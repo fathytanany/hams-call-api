@@ -1,0 +1,8 @@
+.private/
+.claude/settings.local.json
+.env
+__pycache__/
+.venv/
+recordings/
+
+.DS_Store

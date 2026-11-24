@@ -9,11 +9,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
+import psycopg
 import pytest
 from conftest import TO, FakeApp, Hook, insert, wait_for_status, write_wav
 from psycopg_pool import AsyncConnectionPool
 
-from callapi import db
+from callapi import db, runner
 from callapi.runner import Supervisor
 
 
@@ -64,8 +65,13 @@ async def test_only_a_heartbeat_older_than_10s_counts_as_dead(pool: AsyncConnect
 
 
 async def test_peer_completes_a_dead_servers_call_and_reports_it(
-    pool: AsyncConnectionPool, fake_app: FakeApp, tmp_path: Path, hook: Hook
+    pool: AsyncConnectionPool,
+    fake_app: FakeApp,
+    tmp_path: Path,
+    hook: Hook,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(runner, "REAP_AFTER_BEATING", 0)  # b's warm-up has its own test
     write_wav(tmp_path / f"{TO}.wav", 10.0)
     a = server(pool, tmp_path, "server-a", max_calls=10)
     b = server(pool, tmp_path, "server-b", max_calls=0)  # never claims, so the call is a's
@@ -108,6 +114,36 @@ async def test_peer_completes_a_dead_servers_call_and_reports_it(
     assert (last["CallStatus"], last["SequenceNumber"]) == ("completed", "1")
     assert last["CallDuration"] == "1" and last["RecordingSid"] == f"RE{call.sid[2:]}"
     assert got[1].signed
+
+
+async def test_server_back_from_a_db_outage_waits_before_reaping(
+    pool: AsyncConnectionPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An outage leaves every heartbeat stale, live peers' included. Reaping as soon as the
+    # database returns would end all their calls, so b first beats as long as the threshold.
+    monkeypatch.setattr(runner, "REAP_AFTER_BEATING", 1.5)
+    call = await insert(pool, "ws://unused/s")
+    await db.claim_calls(pool, "server-a", 1)
+    assert await db.answer_call(pool, call.sid, "server-a")
+    await run_sql(pool, "INSERT INTO servers VALUES ('server-a', now() - interval '11 s')")
+
+    outage_ticks = 2
+    real_heartbeat = db.heartbeat
+
+    async def heartbeat_during_outage(pool: AsyncConnectionPool, server_id: str) -> bool:
+        nonlocal outage_ticks
+        if outage_ticks:
+            outage_ticks -= 1
+            raise psycopg.OperationalError("database is down")
+        return await real_heartbeat(pool, server_id)
+
+    monkeypatch.setattr(db, "heartbeat", heartbeat_during_outage)
+    b = server(pool, tmp_path, "server-b", max_calls=0)
+    async with running(b):
+        await asyncio.sleep(3.5)  # back at ~2s, so ~1.5s of beating at most
+        held = await db.get_call(pool, call.sid)
+        assert held is not None and held.status == "in-progress"
+        await wait_for_status(pool, call.sid, "completed")  # a never beat again: reaped
 
 
 async def test_reaped_server_that_wakes_up_stops_its_calls(

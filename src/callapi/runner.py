@@ -33,6 +33,9 @@ log = logging.getLogger(__name__)
 FRAME_SECONDS = 0.02
 # Claim, hangup-flag, heartbeat and reap interval when nobody pokes us (ADR-003).
 POLL_SECONDS = 1.0
+# Reap only after beating this long without a database error: peers then had as long to
+# beat as we did. Matches the 10s dead threshold in db.reap_dead_servers (ADR-004).
+REAP_AFTER_BEATING = 10.0
 CONNECT_TIMEOUT = 10.0  # ASSUMPTIONS 12
 # websockets' keepalive: an app that stops reading stops answering pings and is closed.
 PING_INTERVAL = 20.0
@@ -241,10 +244,14 @@ class Supervisor:
             await self.http.aclose()
 
     async def _claim_forever(self) -> None:
+        beating_since: float | None = None
         while True:
             self._poke.clear()  # before claiming, so a poke during the claim isn't lost
             try:
-                if not await db.heartbeat(self.pool, self.server_id) and self._hangups:
+                alive = await db.heartbeat(self.pool, self.server_id)
+                if not alive or beating_since is None:
+                    beating_since = time.monotonic()
+                if not alive and self._hangups:
                     # Peers wrote us off (a long pause or a partition) and already ended
                     # these calls; our own writes would match 0 rows, so stop streaming.
                     log.error("declared dead by peers; stopping %d calls", len(self._hangups))
@@ -259,8 +266,12 @@ class Supervisor:
                 if self._hangups:
                     for sid in await db.hangups_requested(self.pool, self.server_id):
                         self.hang_up(sid)
-                await self.reap()
+                # After a database outage every peer's heartbeat is stale too; reaping
+                # then would end all their live calls.
+                if time.monotonic() - beating_since >= REAP_AFTER_BEATING:
+                    await self.reap()
             except psycopg.Error:
+                beating_since = None
                 log.exception("supervisor tick failed; retrying")
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._poke.wait(), POLL_SECONDS)

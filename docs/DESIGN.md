@@ -32,7 +32,7 @@ client ──HTTP──▶ api2 ─┼── Postgres ────┤  (pacer, r
 - **Server dies (ADR-004):** peers see its heartbeat go 10s stale. One statement deletes its `servers` row and updates its calls, so exactly one peer reaps. `in-progress` → `completed` with `end_time` = last heartbeat; `ringing` → `failed`; `queued` calls had no owner and are simply claimed by a peer. The reaper patches the half-written WAV header and sends the `completed` callback with the right `SequenceNumber`. The live stream is not migrated; Twilio doesn't migrate one either.
 - **Zombie server:** a paused server that was reaped finds its heartbeat update matches 0 rows, stops its streams (`stop` to the app), and its fenced writes can't overwrite the reaper's record.
 - **Demonstrated:** `docker compose kill api1` with 10 calls live on each server and 19 queued: api2 reaped api1's calls 10s later, ran all queued calls, 40/40 ended as expected.
-- **Postgres down:** API requests fail with 5xx and the supervisor logs and retries each tick. Running calls keep streaming (the media path never touches the database), but a status write that fails is not retried, so that call can stay `in-progress` while its owner lives. Known gap; one database is the single point of failure (managed HA in production).
+- **Postgres down:** API requests fail with 5xx and the supervisor logs and retries each tick. Running calls keep streaming (the media path never touches the database), and each call's status writes retry every second until it is back, so no call is left `in-progress` by a live owner. `duration` is measured on the server's monotonic clock, so the outage isn't billed as call time. If the outage outlasts 10s, peers may reap the call when the database returns; fencing then makes the owner's retried write a no-op. One database is still the single point of failure (managed HA in production).
 - **Callback receiver down:** retried once on connect failure, never blocks a call. Queued callbacks die with their server (ADR-009 known gap); the reaper still sends `completed`.
 
 ## What changes at 1,000 calls
@@ -42,7 +42,6 @@ client ──HTTP──▶ api2 ─┼── Postgres ────┤  (pacer, r
 - **Callbacks:** an in-memory outbox per call is fine at this rate; a Postgres outbox would make them survive restarts.
 
 ## What's next
-- Retry a call's final status write until the database is back.
 - Graceful drain on SIGTERM (stop claiming, let calls finish) instead of leaving them to the reaper.
 - `LISTEN/NOTIFY` to cut cross-server hangup latency from ≤1s to milliseconds.
 - Durable callback outbox; object storage for recordings; a polyphase resampler for 16k input.

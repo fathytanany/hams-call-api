@@ -1,0 +1,11 @@
+.git
+.private
+.venv
+.claude
+CLAUDE.md
+recordings
+out
+**/__pycache__
+.mypy_cache
+.pytest_cache
+.ruff_cache

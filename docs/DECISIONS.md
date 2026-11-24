@@ -51,7 +51,10 @@ Short ADRs, one per decision. Format: context → choice → why → rejected. W
     - `ringing` → `failed`.
     - `queued` rows have no owner, so a peer simply claims them.
   - The reaper patches the partial WAV header so the recording can be downloaded, and sends the `completed` callback.
-  - The `UPDATE … WHERE status IN (…) AND owner = dead` is atomic, so only one reaper wins.
+  - One statement reaps: a CTE deletes the dead server's row and feeds the `UPDATE` of its calls. Deleting the row is the claim, so when two peers reap at once the second finds nothing.
+  - The `completed` callback continues the dead owner's `SequenceNumber`, derived from how far the call got (ADR-009).
+  - A reaped server that wakes up learns it from its heartbeat: the `UPDATE` of its own row matches 0 rows. It then ends every call it still runs: the app gets `stop`, and its final writes are fenced off, so the reaper's record stands. It re-registers and carries on claiming.
+- **Accepted cost:** `end_time` is the last heartbeat, so a reaped call's `duration` can undercount by up to the 1s heartbeat interval. The recording holds whatever the dead server wrote before dying.
 - **Why:** It's Twilio-like: an answered call that drops ends as `completed`. No audio is invented and the app sees only one stream.
 - **Rejected:**
   - Mark the call `failed`: Twilio reserves that for calls that never connected.

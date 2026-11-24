@@ -90,10 +90,11 @@ Checks:
 Heartbeat, reaper, owner fencing, a zombie server stopping its own calls, `api2` in compose, a shared recordings volume.
 
 Checks:
-- [ ] Test runs two supervisors in one process; one dies without cleanup → after 10s the peer marks its calls `completed`, patches the WAV and sends the `completed` callback
-- [ ] A paused server that has been reaped finds its writes match 0 rows and closes its streams
-- [ ] Demo: `docker compose kill api1` mid-run → api1's calls end `completed`, and queued calls run on api2
-- [ ] `make check` green, committed
+- [x] Test runs two supervisors in one process; one dies without cleanup → after 10s the peer marks its calls `completed`, patches the WAV and sends the `completed` callback
+- [x] A paused server that has been reaped finds its writes match 0 rows and closes its streams
+- [x] Demo: `docker compose kill api1` mid-run → api1's calls end `completed`, and queued calls run on api2
+  - `MAX_CALLS=10 docker compose up -d`, then `scripts/demo.py --api http://localhost:8001 --calls 40` and `docker compose kill api1` 1s in: 10 calls in progress on each server and 19 queued. api2 reaped api1's 10 calls exactly 10s after the kill and ran all 19 queued calls. 40/40 ended as expected, and the reaped calls' recordings download from api2.
+- [x] `make check` green, committed
 
 ## 9. Design doc (45m)
 - [ ] `docs/DESIGN.md`, at most 2 pages:

@@ -1,5 +1,7 @@
+import asyncio
 import re
 import secrets
+import socket
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,6 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 from starlette.exceptions import HTTPException
 
 from callapi import config, db, twiml
+from callapi.runner import Supervisor
 
 API = "/2010-04-01"
 ACCOUNT = f"{API}/Accounts/{{account_sid}}"
@@ -29,8 +32,21 @@ MAX_PAGE_SIZE = 1000
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with AsyncConnectionPool(config.DATABASE_URL, open=False) as pool:
         await db.apply_schema(pool)
-        app.state.pool = pool
-        yield
+        # A random suffix: a restarted container keeps its hostname and pid but must not
+        # inherit the dead instance's calls.
+        server_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+        supervisor = Supervisor(
+            pool, server_id=server_id, max_calls=config.MAX_CALLS, media_dir=config.MEDIA_DIR
+        )
+        app.state.pool, app.state.supervisor = pool, supervisor
+        task = asyncio.create_task(supervisor.run())
+        try:
+            yield
+        finally:
+            # Calls still running are left for the reaper (ADR-004).
+            for t in (task, *supervisor.calls):
+                t.cancel()
+            await asyncio.gather(task, *supervisor.calls, return_exceptions=True)
 
 
 app = FastAPI(title="Twilio-compatible Call API", lifespan=lifespan)
@@ -216,6 +232,7 @@ async def create_call(request: Request, pool: Pool) -> dict[str, Any]:
         status_callback_events=[e for e in EVENTS if e in events] or ["completed"],
         ring_timeout=timeout,
     )
+    request.app.state.supervisor.poke()
     return call_json(call)
 
 

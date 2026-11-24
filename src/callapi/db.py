@@ -106,3 +106,55 @@ async def list_calls(
             {"to": to, "from": from_, "status": status, "limit": limit, "offset": offset},
         )
         return await cur.fetchall()
+
+
+async def claim_calls(pool: AsyncConnectionPool, owner: str, limit: int) -> list[Call]:
+    """Oldest queued calls first; SKIP LOCKED lets several servers claim without overlap."""
+    async with pool.connection() as conn:
+        cur = conn.cursor(row_factory=class_row(Call))
+        await cur.execute(
+            """
+            UPDATE calls
+            SET status = 'ringing', owner = %(owner)s, start_time = now(), date_updated = now(),
+                queue_time = (extract(epoch FROM now() - date_created) * 1000)::int
+            WHERE sid IN (
+                SELECT sid FROM calls WHERE status = 'queued'
+                ORDER BY date_created LIMIT %(limit)s
+                FOR UPDATE SKIP LOCKED)
+            RETURNING *
+            """,
+            {"owner": owner, "limit": limit},
+        )
+        return await cur.fetchall()
+
+
+async def answer_call(pool: AsyncConnectionPool, sid: str, owner: str) -> datetime | None:
+    """Marks the call in-progress; returns the answer time, or None if we lost ownership."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            UPDATE calls SET status = 'in-progress', date_updated = now()
+            WHERE sid = %s AND owner = %s AND status = 'ringing'
+            RETURNING date_updated
+            """,
+            (sid, owner),
+        )
+        row = await cur.fetchone()
+    return None if row is None else row[0]
+
+
+async def complete_call(
+    pool: AsyncConnectionPool, sid: str, owner: str, answered: datetime
+) -> bool:
+    """Ends an answered call; False if another server reaped it first (ADR-003 fencing)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            UPDATE calls
+            SET status = 'completed', end_time = now(), date_updated = now(),
+                duration = round(extract(epoch FROM now() - %s))::int
+            WHERE sid = %s AND owner = %s AND status = 'in-progress'
+            """,
+            (answered, sid, owner),
+        )
+    return cur.rowcount == 1

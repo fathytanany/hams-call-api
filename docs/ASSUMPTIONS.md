@@ -21,7 +21,7 @@ The spec is intentionally incomplete, and Twilio's docs leave some behavior unst
 11. **Timestamps.**
     - `start_time` is when dialing started (the claim).
     - `queue_time` is `start_time − date_created` in ms.
-    - `duration` runs from answer to end, rounded **up** to whole seconds.
+    - `duration` runs from answer to end, rounded to the **nearest** whole second. Rounding up would report a 2s file as `"3"`, because connecting to the app and closing take a few ms.
     - `end_time` and `duration` are set only for `completed` calls, as Twilio documents.
 12. **App connection.** Connecting to the app's WebSocket times out after 10s. A connect failure or timeout ends the call `completed` with the error logged, because it was already answered (ADR-010).
 13. **How a call ends.**
@@ -29,7 +29,7 @@ The spec is intentionally incomplete, and Twilio's docs leave some behavior unst
     - The app closes the socket → `completed`, no `stop` sent.
     - API hangup → we send `stop`, close, and the call is `completed`.
 14. **Hangup latency.** An API hangup takes effect within ≤1s, the owner's poll interval (ADR-003).
-15. **Per-server capacity.** Each server runs at most `MAX_CALLS` calls (default 500). Extra calls stay `queued`, and `queue_time` shows the wait.
+15. **Per-server capacity.** Each server runs at most `MAX_CALLS` calls (default 500). Extra calls stay `queued`, and `queue_time` shows the wait. `MAX_CALLS=0` makes an API-only server, which the API tests use so their calls stay `queued`.
 
 ## Streams, audio and recording
 16. **Message numbering.**

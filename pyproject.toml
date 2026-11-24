@@ -9,6 +9,7 @@ dependencies = [
     "fastapi",
     "psycopg[binary,pool]>=3.3.9",
     "uvicorn[standard]",
+    "websockets>=17.4",
 ]
 
 [dependency-groups]

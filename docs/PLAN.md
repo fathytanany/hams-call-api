@@ -39,10 +39,10 @@ Checks:
 - Fake WS app fixture for tests.
 
 Checks:
-- [ ] Pacing test written first: 250 frames arrive in 5s ± 40ms with no cumulative drift; a forced 200 ms stall is caught up and never re-anchored
-- [ ] Message shapes match TWILIO_CONTRACT §5 (string numbers, `sequenceNumber` from 1, `chunk` from 1)
-- [ ] A 2s file → the app receives 100 media frames, then `stop`; the call is `completed` with `duration` "2"
-- [ ] `make check` green, committed
+- [x] Pacing test written first: 250 frames arrive in 5s ± 40ms with no cumulative drift; a forced 200 ms stall is caught up and never re-anchored
+- [x] Message shapes match TWILIO_CONTRACT §5 (string numbers, `sequenceNumber` from 1, `chunk` from 1)
+- [x] A 2s file → the app receives 100 media frames, then `stop`; the call is `completed` with `duration` "2"
+- [x] `make check` green, committed
 
 ## 4. App audio, marks, recording (60m)
 Receiver task, playout buffer, marks and `clear`, per-tick recording, the Recordings endpoints.

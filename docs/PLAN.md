@@ -81,9 +81,10 @@ Checks:
 - Both added to compose.
 
 Checks:
-- [ ] `docker compose up` → `make demo` runs 20 concurrent calls; every call ends in its expected status
-- [ ] 200 calls on one process: the maximum pacing lateness is reported (the number goes in the design doc)
-- [ ] `make check` green, committed
+- [x] `docker compose up` → `make demo` runs 20 concurrent calls; every call ends in its expected status
+- [x] 200 calls on one process: the maximum pacing lateness is reported (the number goes in the design doc)
+  - `make demo CALLS=200` on Docker Desktop (10-core Mac, test app on the same host): 200/200 as expected, max lateness 29.4 ms, p95 27.4 ms, median 17.2 ms, no frames dropped. The calls are only 2s long, so this mostly measures 200 streams starting at once; no call drifted (each sent all 100 frames).
+- [x] `make check` green, committed
 
 ## 8. Multi-server hardening (45m)
 Heartbeat, reaper, owner fencing, a zombie server stopping its own calls, `api2` in compose, a shared recordings volume.

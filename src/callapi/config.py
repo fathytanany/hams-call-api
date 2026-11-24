@@ -10,3 +10,5 @@ MEDIA_DIR = Path(os.environ.get("MEDIA_DIR", "media"))
 RECORDINGS_DIR = Path(os.environ.get("RECORDINGS_DIR", "recordings"))
 # Calls this server runs at once; extra calls wait in `queued`. 0 makes an API-only server.
 MAX_CALLS = int(os.environ.get("MAX_CALLS", "500"))
+# Base of the RecordingUrl sent in callbacks; the runner has no request to take it from.
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:8000")

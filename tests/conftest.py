@@ -110,7 +110,13 @@ def write_wav(path: Path, seconds: float, rate: int = 8000) -> None:
 
 
 async def insert(
-    pool: AsyncConnectionPool, url: str, to: str = TO, ring_timeout: int = 60
+    pool: AsyncConnectionPool,
+    url: str,
+    to: str = TO,
+    ring_timeout: int = 60,
+    status_callback: str | None = None,
+    method: str = "POST",
+    events: tuple[str, ...] = ("completed",),
 ) -> db.Call:
     return await db.insert_call(
         pool,
@@ -119,9 +125,9 @@ async def insert(
         from_="+15550000",
         stream_url=url,
         stream_params={"mode": "normal"},
-        status_callback=None,
-        status_callback_method="POST",
-        status_callback_events=["completed"],
+        status_callback=status_callback,
+        status_callback_method=method,
+        status_callback_events=list(events),
         ring_timeout=ring_timeout,
     )
 
@@ -140,6 +146,6 @@ async def supervisor(pool: AsyncConnectionPool, tmp_path: Path) -> AsyncIterator
     )
     task = asyncio.create_task(sup.run())
     yield sup
-    for t in (task, *sup.calls):
+    for t in (task, *sup.calls, *sup.callbacks):
         t.cancel()
-    await asyncio.gather(task, *sup.calls, return_exceptions=True)
+    await asyncio.gather(task, *sup.calls, *sup.callbacks, return_exceptions=True)

@@ -22,8 +22,6 @@ CREATE TABLE IF NOT EXISTS calls (
     owner                   text,
     -- Set by an API hangup on any server; the owner polls it and ends the call (ADR-003).
     hangup_requested        boolean NOT NULL DEFAULT false,
-    -- SequenceNumber of the next status callback, bumped with the status (ADR-009).
-    callback_seq            integer NOT NULL DEFAULT 0,
     date_created            timestamptz NOT NULL DEFAULT now(),
     date_updated            timestamptz NOT NULL DEFAULT now(),
     start_time              timestamptz,

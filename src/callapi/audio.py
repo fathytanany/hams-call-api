@@ -79,6 +79,11 @@ def patch_wav_header(path: Path) -> None:
         f.write(_wav_header(data_bytes))
 
 
+def wav_seconds(path: Path) -> float:
+    """Length of a recording written by RecordingWriter (16-bit mono)."""
+    return (path.stat().st_size - HEADER_BYTES) / (2 * RATE)
+
+
 class RecordingWriter:
     """Appends mu-law frames as 16-bit PCM. Sizes are only known at the end, so close()
     uses the same patch_wav_header a peer server runs on a dead server's recordings."""

@@ -13,12 +13,13 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+import httpx
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
-from callapi import config, db
+from callapi import callbacks, config, db
 from callapi.audio import MediaFormatError, MediaReader, Playout, RecordingWriter
 
 log = logging.getLogger(__name__)
@@ -193,6 +194,9 @@ class Supervisor:
         self.media_dir = media_dir
         self.recordings_dir = recordings_dir
         self.calls: set[asyncio.Task[None]] = set()
+        # Callback senders outlive their call, so a slow receiver never holds a call slot.
+        self.callbacks: set[asyncio.Task[None]] = set()
+        self.http = httpx.AsyncClient(timeout=callbacks.TIMEOUT)
         self._hangups: dict[str, asyncio.Event] = {}  # by CallSid, for calls we run
         self._poke = asyncio.Event()
 
@@ -213,6 +217,12 @@ class Supervisor:
         self.poke()  # a slot is free
 
     async def run(self) -> None:
+        try:
+            await self._claim_forever()
+        finally:
+            await self.http.aclose()
+
+    async def _claim_forever(self) -> None:
         while True:
             self._poke.clear()  # before claiming, so a poke during the claim isn't lost
             try:
@@ -231,31 +241,54 @@ class Supervisor:
                 await asyncio.wait_for(self._poke.wait(), POLL_SECONDS)
 
     async def _run_call(self, call: db.Call) -> None:
+        status_callbacks = callbacks.StatusCallbacks(call, self.http)
+        self.callbacks.add(status_callbacks.task)
+        status_callbacks.task.add_done_callback(self.callbacks.discard)
+        # Claimed means dialing and ringing at once (TWILIO_CONTRACT §2).
+        status_callbacks.fire("initiated", "initiated")
+        status_callbacks.fire("ringing", "ringing")
+        try:
+            await self._ring_and_stream(call, status_callbacks)
+        finally:
+            status_callbacks.close()
+
+    async def _end_unanswered(
+        self, sid: str, status: str, status_callbacks: callbacks.StatusCallbacks
+    ) -> None:
+        # A callback only follows our own write, so a reaped call is never reported twice.
+        if await db.end_unanswered(self.pool, sid, self.server_id, status):
+            status_callbacks.fire("completed", status, callbacks.unanswered(status))
+
+    async def _ring_and_stream(
+        self, call: db.Call, status_callbacks: callbacks.StatusCallbacks
+    ) -> None:
         sid, owner, hangup = call.sid, self.server_id, self._hangups[call.sid]
         # The callee is a file: markers decide busy and no-answer (ADR-010).
         callee = self.media_dir / call.to_number
         if callee.with_name(f"{call.to_number}.busy").exists():
-            await db.end_unanswered(self.pool, sid, owner, "busy")
+            await self._end_unanswered(sid, "busy", status_callbacks)
             return
         if callee.with_name(f"{call.to_number}.no-answer").exists():
             with suppress(TimeoutError):
                 await asyncio.wait_for(hangup.wait(), call.ring_timeout)
             status = "canceled" if hangup.is_set() else "no-answer"
-            await db.end_unanswered(self.pool, sid, owner, status)
+            await self._end_unanswered(sid, status, status_callbacks)
             return
         try:
             media = MediaReader(callee.with_name(f"{call.to_number}.wav"))
         except (OSError, MediaFormatError) as e:
             log.warning("call %s failed: %s", sid, e)
-            await db.end_unanswered(self.pool, sid, owner, "failed")
+            await self._end_unanswered(sid, "failed", status_callbacks)
             return
 
+        recording_path = self.recordings_dir / f"{sid}.wav"
         with media:
             answered = await db.answer_call(self.pool, sid, owner)
             if answered is None:
                 # Hung up while ringing (a no-op if another server reaped the call instead).
-                await db.end_unanswered(self.pool, sid, owner, "canceled")
+                await self._end_unanswered(sid, "canceled", status_callbacks)
                 return
+            status_callbacks.fire("answered", "in-progress")
             try:
                 async with connect(
                     call.stream_url,
@@ -265,10 +298,14 @@ class Supervisor:
                     close_timeout=CLOSE_TIMEOUT,
                 ) as ws:
                     # Opened at `start`, so the recording lines up with the stream's timestamps.
-                    with RecordingWriter(self.recordings_dir / f"{sid}.wav") as recording:
+                    with RecordingWriter(recording_path) as recording:
                         await stream(ws, call, media, recording, hangup)
             except (OSError, TimeoutError, WebSocketException) as e:
                 # The callee already answered, so a failed stream still ends `completed`
                 # (ADR-010).
                 log.warning("call %s: stream to %s failed: %r", sid, call.stream_url, e)
-            await db.complete_call(self.pool, sid, owner, answered)
+            duration = await db.complete_call(self.pool, sid, owner, answered)
+            if duration is not None:
+                status_callbacks.fire(
+                    "completed", "completed", callbacks.completed(sid, duration, recording_path)
+                )

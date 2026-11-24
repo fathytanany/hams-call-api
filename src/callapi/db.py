@@ -23,7 +23,6 @@ class Call:
     ring_timeout: int
     owner: str | None
     hangup_requested: bool
-    callback_seq: int
     date_created: datetime
     date_updated: datetime
     start_time: datetime | None
@@ -147,8 +146,9 @@ async def answer_call(pool: AsyncConnectionPool, sid: str, owner: str) -> dateti
 
 async def complete_call(
     pool: AsyncConnectionPool, sid: str, owner: str, answered: datetime
-) -> bool:
-    """Ends an answered call; False if another server reaped it first (ADR-003 fencing)."""
+) -> int | None:
+    """Ends an answered call and returns its duration; None if another server reaped it
+    first (ADR-003 fencing)."""
     async with pool.connection() as conn:
         cur = await conn.execute(
             """
@@ -156,22 +156,26 @@ async def complete_call(
             SET status = 'completed', end_time = now(), date_updated = now(),
                 duration = round(extract(epoch FROM now() - %s))::int
             WHERE sid = %s AND owner = %s AND status = 'in-progress'
+            RETURNING duration
             """,
             (answered, sid, owner),
         )
-    return cur.rowcount == 1
+        row = await cur.fetchone()
+    return None if row is None else int(row[0])
 
 
-async def end_unanswered(pool: AsyncConnectionPool, sid: str, owner: str, status: str) -> None:
-    """busy, no-answer, failed or canceled: no end_time or duration, as Twilio documents."""
+async def end_unanswered(pool: AsyncConnectionPool, sid: str, owner: str, status: str) -> bool:
+    """busy, no-answer, failed or canceled: no end_time or duration, as Twilio documents.
+    False if another server reaped the call first."""
     async with pool.connection() as conn:
-        await conn.execute(
+        cur = await conn.execute(
             """
             UPDATE calls SET status = %s, date_updated = now()
             WHERE sid = %s AND owner = %s AND status = 'ringing'
             """,
             (status, sid, owner),
         )
+    return cur.rowcount == 1
 
 
 async def hang_up(pool: AsyncConnectionPool, sid: str, status: str) -> Call | None:

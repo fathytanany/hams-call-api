@@ -18,7 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 from starlette.exceptions import HTTPException
 
 from callapi import config, db, twiml
-from callapi.audio import HEADER_BYTES, RATE
+from callapi.audio import wav_seconds
 from callapi.runner import Supervisor
 
 API = "/2010-04-01"
@@ -54,9 +54,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             yield
         finally:
             # Calls still running are left for the reaper (ADR-004).
-            for t in (task, *supervisor.calls):
+            # Unsent callbacks are lost (ADR-009).
+            tasks = (task, *supervisor.calls, *supervisor.callbacks)
+            for t in tasks:
                 t.cancel()
-            await asyncio.gather(task, *supervisor.calls, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(title="Twilio-compatible Call API", lifespan=lifespan)
@@ -326,7 +328,6 @@ def recording_path(call: db.Call) -> Path | None:
 def recording_json(request: Request, call: db.Call, path: Path) -> dict[str, Any]:
     sid = f"RE{call.sid[2:]}"
     uri = f"{API}/Accounts/{config.ACCOUNT_SID}/Recordings/{sid}"
-    seconds = (path.stat().st_size - HEADER_BYTES) / (2 * RATE)  # 16-bit mono
     return {
         "sid": sid,
         "account_sid": config.ACCOUNT_SID,
@@ -336,7 +337,7 @@ def recording_json(request: Request, call: db.Call, path: Path) -> dict[str, Any
         "date_created": rfc2822(call.start_time),
         "date_updated": rfc2822(call.end_time or call.date_updated),
         "start_time": rfc2822(call.start_time),
-        "duration": str(round(seconds)),
+        "duration": str(round(wav_seconds(path))),
         "price": None,
         "price_unit": "USD",
         "status": "completed",

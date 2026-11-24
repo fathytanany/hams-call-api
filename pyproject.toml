@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "audioop-lts; python_version >= '3.13'",
     "fastapi",
+    "httpx>=0.28.1",
     "psycopg[binary,pool]>=3.3.9",
     "uvicorn[standard]",
     "websockets>=17.4",
@@ -14,7 +15,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx",
     "mypy",
     "pytest",
     "pytest-asyncio",

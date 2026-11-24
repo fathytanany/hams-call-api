@@ -1,15 +1,21 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import struct
+import threading
 import time
 import uuid
 import wave
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 import psycopg
 import pytest
@@ -150,3 +156,72 @@ async def supervisor(pool: AsyncConnectionPool, tmp_path: Path) -> AsyncIterator
     for t in (task, *sup.calls, *sup.callbacks):
         t.cancel()
     await asyncio.gather(task, *sup.calls, *sup.callbacks, return_exceptions=True)
+
+
+def twilio_signature(token: str, url: str, params: dict[str, str]) -> str:
+    """TWILIO_CONTRACT §6, written out independently of callapi.callbacks."""
+    payload = url + "".join(name + params[name] for name in sorted(params))
+    return base64.b64encode(
+        hmac.new(token.encode(), payload.encode(), hashlib.sha1).digest()
+    ).decode()
+
+
+@dataclass
+class Received:
+    method: str
+    params: dict[str, str]
+    signed: bool  # X-Twilio-Signature matched our own HMAC
+
+
+@dataclass
+class Hook:
+    """A StatusCallback receiver that checks each request's signature."""
+
+    @property
+    def url(self) -> str:
+        return f"{self.base}/hook"
+
+    base: str = ""  # scheme and host, which the request line leaves out
+    received: list[Received] = field(default_factory=list)
+    delay: float = 0.0
+
+    async def wait_for(self, n: int) -> list[Received]:
+        async with asyncio.timeout(10):
+            while len(self.received) < n:  # noqa: ASYNC110 - filled by the server thread
+                await asyncio.sleep(0.05)
+        return self.received
+
+
+@pytest.fixture
+def hook() -> Iterator[Hook]:
+    hook = Hook()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            url = hook.base + self.path
+            if self.command == "POST":
+                body = self.rfile.read(int(self.headers["Content-Length"])).decode()
+                params = dict(parse_qsl(body))
+                signed_params = params
+            else:  # GET signs the URL alone, query string included
+                params, signed_params = dict(parse_qsl(urlsplit(self.path).query)), {}
+            expected = twilio_signature(config.AUTH_TOKEN, url, signed_params)
+            signed = self.headers["X-Twilio-Signature"] == expected
+            hook.received.append(Received(self.command, params, signed))
+            time.sleep(hook.delay)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_GET = do_POST
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    hook.base = f"http://127.0.0.1:{server.server_address[1]}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield hook
+    server.shutdown()
+    server.server_close()

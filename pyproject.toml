@@ -5,6 +5,7 @@ description = "Twilio-compatible Call API that streams WAV files to apps over Me
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "audioop-lts; python_version >= '3.13'",
     "fastapi",
     "uvicorn[standard]",
 ]
@@ -37,3 +38,5 @@ files = ["src", "tests"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# audioop is deprecated in 3.12's stdlib; 3.13+ gets the same module from audioop-lts.
+filterwarnings = ["ignore:'audioop' is deprecated:DeprecationWarning"]

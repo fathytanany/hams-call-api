@@ -1,9 +1,12 @@
-.PHONY: run test lint check
+.PHONY: run test lint check db
 
-run:
+db:
+	docker compose up -d --wait db
+
+run: db
 	uv run uvicorn callapi.main:app --reload --port 8000
 
-test:
+test: db
 	uv run pytest
 
 lint:

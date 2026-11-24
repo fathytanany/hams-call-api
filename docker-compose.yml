@@ -1,7 +1,26 @@
 services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: callapi
+      POSTGRES_PASSWORD: callapi
+      POSTGRES_DB: callapi
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "callapi"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
   api:
     build: .
     ports:
       - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://callapi:callapi@db:5432/callapi
+    depends_on:
+      db:
+        condition: service_healthy
     volumes:
       - ./media:/app/media:ro

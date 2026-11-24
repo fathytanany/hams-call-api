@@ -79,6 +79,7 @@ Body: `{"code": <int>, "message": <str>, "more_info": <url>, "status": <http sta
 | 400 | 21201 | `To` missing (Twilio's example message: "No to number is specified") |
 | 400 | 21213 | `From` missing ("Caller phone number is required") |
 | 400 | 21211 | `To` not a phone number **(inferred code)** |
+| 400 | 21212 | `From` not a phone number **(inferred code)** |
 | 400 | 21205 | No `Twiml` given **(inferred: Twilio's code for a missing/invalid Url)** |
 | 400 | none | An unsupported parameter (`Url`, `ApplicationSid`) or unsupported TwiML. The message says so. |
 | 401 | 20003 | Missing or invalid Basic credentials |

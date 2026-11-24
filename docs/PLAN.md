@@ -27,11 +27,11 @@ Checks:
 `schema.sql` (`calls`, `servers`), psycopg pool in the app lifespan, Basic auth, Twilio error bodies, create/fetch/list, TwiML parsing, Call JSON. Add a `db` service to compose; `make test` starts it.
 
 Checks:
-- [ ] `curl -u AC…:token -d To=+15550001 -d From=+15550000 --data-urlencode Twiml=…` → 201 with all 27 Call fields and `status=queued`
-- [ ] Bad credentials → 401 / 20003; missing `To` → 400 / 21201; unknown sid → 404 / 20404
-- [ ] `To=../../etc/passwd` → 400 / 21211
-- [ ] List filters by `Status`, and following `next_page_uri` visits every call exactly once
-- [ ] `make check` green, committed
+- [x] `curl -u AC…:token -d To=+15550001 -d From=+15550000 --data-urlencode Twiml=…` → 201 with all 27 Call fields and `status=queued`
+- [x] Bad credentials → 401 / 20003; missing `To` → 400 / 21201; unknown sid → 404 / 20404
+- [x] `To=../../etc/passwd` → 400 / 21211
+- [x] List filters by `Status`, and following `next_page_uri` visits every call exactly once
+- [x] `make check` green, committed
 
 ## 3. Call runner, happy path (60m)
 - Supervisor: claims calls with `SKIP LOCKED` and gets a local poke when this server creates a call.

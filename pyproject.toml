@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "audioop-lts; python_version >= '3.13'",
     "fastapi",
+    "psycopg[binary,pool]>=3.3.9",
     "uvicorn[standard]",
 ]
 
@@ -39,4 +40,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # audioop is deprecated in 3.12's stdlib; 3.13+ gets the same module from audioop-lts.
-filterwarnings = ["ignore:'audioop' is deprecated:DeprecationWarning"]
+filterwarnings = [
+    "ignore:'audioop' is deprecated:DeprecationWarning",
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]

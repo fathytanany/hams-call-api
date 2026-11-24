@@ -1,0 +1,186 @@
+from email.utils import parsedate_to_datetime
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+from callapi import config
+
+BASE = f"/2010-04-01/Accounts/{config.ACCOUNT_SID}"
+TWIML = (
+    '<Response><Connect><Stream url="ws://localhost:9000/s">'
+    '<Parameter name="mode" value="normal"/></Stream></Connect></Response>'
+)
+CALL_FIELDS = {
+    "sid", "account_sid", "parent_call_sid", "phone_number_sid", "group_sid", "trunk_sid",
+    "forwarded_from", "caller_name", "answered_by", "stir_verstat", "price", "to",
+    "to_formatted", "from", "from_formatted", "status", "date_created", "date_updated",
+    "start_time", "end_time", "duration", "queue_time", "price_unit", "direction",
+    "api_version", "uri", "subresource_uris",
+}  # fmt: skip
+
+
+def create(client: TestClient, **overrides: Any) -> Any:
+    data = {"To": "+15550001", "From": "+15550000", "Twiml": TWIML} | overrides
+    return client.post(f"{BASE}/Calls.json", data={k: v for k, v in data.items() if v is not None})
+
+
+def test_create_returns_queued_call_with_all_fields(client: TestClient) -> None:
+    r = create(client)
+    assert r.status_code == 201
+    call = r.json()
+    assert set(call) == CALL_FIELDS
+    assert call["sid"].startswith("CA") and len(call["sid"]) == 34
+    assert call["status"] == "queued"
+    assert call["to"] == call["to_formatted"] == "+15550001"
+    assert call["from"] == "+15550000"
+    assert call["account_sid"] == config.ACCOUNT_SID
+    assert call["direction"] == "outbound-api"
+    assert call["uri"] == f"{BASE}/Calls/{call['sid']}.json"
+    assert call["subresource_uris"]["recordings"] == f"{BASE}/Calls/{call['sid']}/Recordings.json"
+    assert call["date_created"].endswith(" +0000")
+    assert parsedate_to_datetime(call["date_created"]).tzinfo is not None
+    assert call["start_time"] is call["duration"] is call["price"] is None
+
+
+def test_fetch_returns_the_created_call(client: TestClient) -> None:
+    created = create(client).json()
+    r = client.get(f"{BASE}/Calls/{created['sid']}.json")
+    assert r.status_code == 200
+    assert r.json() == created
+
+
+@pytest.mark.parametrize(
+    ("auth", "path_account"),
+    [(None, config.ACCOUNT_SID), ((config.ACCOUNT_SID, "wrong"), config.ACCOUNT_SID)],
+)
+def test_bad_credentials_get_401(
+    client: TestClient, auth: tuple[str, str] | None, path_account: str
+) -> None:
+    client.auth = auth
+    r = client.get(f"/2010-04-01/Accounts/{path_account}/Calls.json")
+    assert r.status_code == 401
+    assert r.json()["code"] == 20003
+    assert r.headers["WWW-Authenticate"].startswith("Basic")
+
+
+def test_malformed_basic_header_gets_401(client: TestClient) -> None:
+    client.auth = None  # httpx would otherwise replace our header
+    r = client.get(f"{BASE}/Calls.json", headers={"Authorization": "Basic !!notbase64"})
+    assert (r.status_code, r.json()["code"]) == (401, 20003)
+
+
+def test_other_account_is_not_found(client: TestClient) -> None:
+    r = client.get(f"/2010-04-01/Accounts/AC{'f' * 32}/Calls.json")
+    assert (r.status_code, r.json()["code"]) == (404, 20404)
+
+
+def test_unknown_call_is_not_found(client: TestClient) -> None:
+    r = client.get(f"{BASE}/Calls/CA{'0' * 32}.json")
+    assert r.status_code == 404
+    assert r.json() == {
+        "code": 20404,
+        "message": f"The requested resource {BASE}/Calls/CA{'0' * 32}.json was not found",
+        "more_info": "https://www.twilio.com/docs/errors/20404",
+        "status": 404,
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code", "fragment"),
+    [
+        ({"To": None}, 21201, "No 'To' number"),
+        ({"From": None}, 21213, "Caller phone number"),
+        ({"To": "../../etc/passwd"}, 21211, "not a valid phone number"),
+        ({"To": "+1555/0001"}, 21211, "not a valid phone number"),
+        ({"From": "evil"}, 21212, "not a valid phone number"),
+        ({"Twiml": None}, 21205, "Twiml is required"),
+        ({"Url": "https://x/twiml"}, None, "Url is not supported"),
+        ({"Twiml": "<Response><Say>hi</Say></Response>"}, None, "<Connect>"),
+        ({"StatusCallback": "ftp://x"}, None, "StatusCallback"),
+        ({"StatusCallbackMethod": "PUT"}, None, "StatusCallbackMethod"),
+        ({"StatusCallbackEvent": "answered bogus"}, None, "bogus"),
+        ({"Timeout": "0"}, None, "Timeout"),
+        ({"Timeout": "ten"}, None, "Timeout"),
+    ],
+)
+def test_create_validation(
+    client: TestClient, overrides: dict[str, str | None], code: int | None, fragment: str
+) -> None:
+    r = create(client, **overrides)
+    assert r.status_code == 400
+    body = r.json()
+    assert body.get("code") == code
+    assert fragment in body["message"]
+
+
+def test_create_stores_callback_settings(client: TestClient) -> None:
+    # Not in the Call JSON, so read the row the runner will use.
+    import psycopg
+
+    sid = client.post(
+        f"{BASE}/Calls.json",
+        data={
+            "To": "+15550001",
+            "From": "+15550000",
+            "Twiml": TWIML,
+            "StatusCallback": "https://cb.example/status",
+            "StatusCallbackMethod": "get",
+            "StatusCallbackEvent": ["completed answered", "initiated"],
+            "Timeout": "9999",
+        },
+    ).json()["sid"]
+    with psycopg.connect(config.DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT stream_url, stream_params, status_callback, status_callback_method,"
+            " status_callback_events, ring_timeout FROM calls WHERE sid = %s",
+            (sid,),
+        ).fetchone()
+    assert row == (
+        "ws://localhost:9000/s",
+        {"mode": "normal"},
+        "https://cb.example/status",
+        "GET",
+        ["initiated", "answered", "completed"],
+        600,
+    )
+
+
+def test_list_filters_by_status_and_to(client: TestClient) -> None:
+    a = create(client, To="+15550001").json()["sid"]
+    create(client, To="+15550002")
+    r = client.get(f"{BASE}/Calls.json", params={"Status": "queued", "To": "+15550001"})
+    assert [c["sid"] for c in r.json()["calls"]] == [a]
+    assert client.get(f"{BASE}/Calls.json", params={"Status": "completed"}).json()["calls"] == []
+
+
+def test_next_page_uri_visits_every_call_once(client: TestClient) -> None:
+    created = {create(client, To="+15550001").json()["sid"] for _ in range(7)}
+    create(client, To="+15550009")  # filtered out; must not leak in via next_page_uri
+
+    seen: list[str] = []
+    uri: str | None = f"{BASE}/Calls.json?To=%2B15550001&PageSize=3"
+    pages = []
+    while uri:
+        body = client.get(uri).json()
+        pages.append(body)
+        seen += [c["sid"] for c in body["calls"]]
+        uri = body["next_page_uri"]
+
+    assert len(seen) == len(set(seen)) and set(seen) == created
+    assert [len(p["calls"]) for p in pages] == [3, 3, 1]
+    assert [(p["page"], p["start"], p["end"]) for p in pages] == [(0, 0, 2), (1, 3, 5), (2, 6, 6)]
+    assert pages[0]["previous_page_uri"] is None
+    assert pages[1]["previous_page_uri"] == pages[0]["uri"]
+    assert all(p["first_page_uri"] == pages[0]["uri"] for p in pages)
+
+
+def test_list_is_newest_first(client: TestClient) -> None:
+    sids = [create(client).json()["sid"] for _ in range(3)]
+    assert [c["sid"] for c in client.get(f"{BASE}/Calls.json").json()["calls"]] == sids[::-1]
+
+
+def test_unsupported_method_is_twilio_shaped(client: TestClient) -> None:
+    r = client.delete(f"{BASE}/Calls.json")
+    assert r.status_code == 405
+    assert set(r.json()) == {"message", "status"}

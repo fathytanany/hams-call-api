@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import secrets
 import socket
@@ -35,6 +36,10 @@ RECORDING_SID = re.compile(r"RE([0-9a-f]{32})")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # uvicorn configures only its own loggers; without this the call logs are dropped.
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     async with AsyncConnectionPool(config.DATABASE_URL, open=False) as pool:
         await db.apply_schema(pool)
         # A random suffix: a restarted container keeps its hostname and pid but must not

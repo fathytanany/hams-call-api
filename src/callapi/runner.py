@@ -138,9 +138,11 @@ async def stream(
     )
     sender = asyncio.create_task(outbox.drain(ws.send))
     receiver = asyncio.create_task(receive(ws, stream_sid, playout, outbox))
+    chunk, late, t0 = 0, 0.0, time.monotonic()
     try:
-        chunk = 0
         async for frame in paced(iter(media.read_frame, None)):
+            # How far behind schedule the clock ran: the real-time number the demo reports.
+            late = max(late, time.monotonic() - t0 - chunk * FRAME_SECONDS)
             if hangup.is_set() or sender.done() or receiver.done():
                 break
             chunk += 1
@@ -167,6 +169,9 @@ async def stream(
         sender.cancel()
         receiver.cancel()
         await asyncio.gather(sender, receiver, return_exceptions=True)
+        log.info(
+            "call %s: streamed %d frames, max pacing lateness %.1f ms", call.sid, chunk, late * 1000
+        )
         if outbox.dropped or playout.dropped_bytes:
             log.warning(
                 "call %s: dropped %d media frames to a slow app, %d bytes over the playout cap",

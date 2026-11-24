@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import suppress
 from pathlib import Path
@@ -18,15 +19,21 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from callapi import config, db
-from callapi.audio import MediaReader, Playout, RecordingWriter
+from callapi.audio import MediaFormatError, MediaReader, Playout, RecordingWriter
 
 log = logging.getLogger(__name__)
 
 FRAME_SECONDS = 0.02
-POLL_SECONDS = 1.0  # claim interval when nobody pokes us (ADR-003)
-CONNECT_TIMEOUT = 10  # ASSUMPTIONS 12
-
-Send = Callable[..., Awaitable[None]]
+POLL_SECONDS = 1.0  # claim and hangup-flag interval when nobody pokes us (ADR-003)
+CONNECT_TIMEOUT = 10.0  # ASSUMPTIONS 12
+# websockets' keepalive: an app that stops reading stops answering pings and is closed.
+PING_INTERVAL = 20.0
+PING_TIMEOUT = 20.0
+# After a missed pong the close frame can't drain to an app that isn't reading, and the
+# socket is only aborted after this; websockets' default of 10s would hold a dead call open.
+CLOSE_TIMEOUT = 2.0
+OUTBOX_MAX = 50  # ~1s of media (ADR-006)
+FLUSH_TIMEOUT = 1.0  # how long `stop` may wait behind a slow app's backlog
 
 
 async def paced(frames: Iterator[bytes]) -> AsyncIterator[bytes]:
@@ -45,11 +52,45 @@ async def paced(frames: Iterator[bytes]) -> AsyncIterator[bytes]:
         await asyncio.sleep(delay)
 
 
-async def receive(
-    ws: ClientConnection, stream_sid: str, playout: Playout, send: Send, sid: str
-) -> None:
-    """App -> service messages: media and marks queue for playout, clear empties it."""
-    with suppress(ConnectionClosed):  # the pacer's next send sees the close and ends the call
+class Outbox:
+    """Service -> app messages after `connected`. The pacer puts without waiting and a
+    sender task drains to the socket, so a slow app never delays the clock, marks or
+    recording. Past ~1s of backlog the oldest media is dropped: stale audio is worthless
+    to a voice agent, and marks and stop are never dropped (ADR-006)."""
+
+    def __init__(self, stream_sid: str) -> None:
+        self.stream_sid = stream_sid
+        self.dropped = 0
+        self._queue: deque[tuple[str, dict[str, Any]]] = deque()
+        self._ready = asyncio.Event()
+
+    def put(self, event: str, body: dict[str, Any]) -> None:
+        if len(self._queue) >= OUTBOX_MAX:
+            for i, (queued, _) in enumerate(self._queue):
+                if queued == "media":
+                    del self._queue[i]
+                    self.dropped += 1
+                    break
+        self._queue.append((event, body))
+        self._ready.set()
+
+    async def drain(self, send: Callable[[str], Awaitable[None]]) -> None:
+        """Sends in order until `stop` is out. Numbered here, so drops leave no gaps."""
+        for seq in itertools.count(1):
+            while not self._queue:
+                self._ready.clear()
+                await self._ready.wait()
+            event, body = self._queue.popleft()
+            msg = {"event": event, "sequenceNumber": str(seq), "streamSid": self.stream_sid}
+            await send(json.dumps(msg | {event: body}))
+            if event == "stop":
+                return
+
+
+async def receive(ws: ClientConnection, stream_sid: str, playout: Playout, outbox: Outbox) -> None:
+    """App -> service messages: media and marks queue for playout, clear empties it.
+    Returns when the app closes the socket."""
+    with suppress(ConnectionClosed):
         async for raw in ws:
             try:
                 msg = json.loads(raw)
@@ -62,30 +103,30 @@ async def receive(
                         playout.add_mark(str(msg["mark"]["name"]))
                     case "clear":
                         for name in playout.clear():
-                            await send("mark", mark={"name": name})
+                            outbox.put("mark", {"name": name})
                     case event:
                         raise ValueError(f"unknown event {event!r}")
             except (ValueError, KeyError, TypeError, AttributeError) as e:
                 # A bad message is ignored; the call goes on (ASSUMPTIONS 17).
-                log.warning("call %s: ignored app message: %r", sid, e)
+                log.warning("stream %s: ignored app message: %r", stream_sid, e)
 
 
 async def stream(
-    ws: ClientConnection, call: db.Call, media: MediaReader, recording: RecordingWriter
+    ws: ClientConnection,
+    call: db.Call,
+    media: MediaReader,
+    recording: RecordingWriter,
+    hangup: asyncio.Event,
 ) -> None:
     """Media Streams messages, TWILIO_CONTRACT §5. Each tick sends one frame of the file
-    and plays one frame of the app's audio into the recording."""
+    and plays one frame of the app's audio into the recording. Ends when the file ends,
+    the call is hung up via the API, or the app goes away (ASSUMPTIONS 13)."""
     stream_sid = f"MZ{uuid.uuid4().hex}"
-    seq = itertools.count(1)
-
-    async def send(event: str, **body: Any) -> None:
-        msg = {"event": event, "sequenceNumber": str(next(seq)), "streamSid": stream_sid}
-        await ws.send(json.dumps(msg | body))
-
     await ws.send(json.dumps({"event": "connected", "protocol": "Call", "version": "1.0.0"}))
-    await send(
+    outbox, playout = Outbox(stream_sid), Playout()
+    outbox.put(
         "start",
-        start={
+        {
             "accountSid": config.ACCOUNT_SID,
             "streamSid": stream_sid,
             "callSid": call.sid,
@@ -94,48 +135,44 @@ async def stream(
             "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1},
         },
     )
-    playout = Playout()
-    receiver = asyncio.create_task(receive(ws, stream_sid, playout, send, call.sid))
+    sender = asyncio.create_task(outbox.drain(ws.send))
+    receiver = asyncio.create_task(receive(ws, stream_sid, playout, outbox))
     try:
         chunk = 0
         async for frame in paced(iter(media.read_frame, None)):
+            if hangup.is_set() or sender.done() or receiver.done():
+                break
             chunk += 1
-            media_body = {
-                "track": "inbound",
-                "chunk": str(chunk),
-                "timestamp": str((chunk - 1) * 20),
-                "payload": base64.b64encode(frame).decode(),
-            }
-            await send("media", media=media_body)
+            outbox.put(
+                "media",
+                {
+                    "track": "inbound",
+                    "chunk": str(chunk),
+                    "timestamp": str((chunk - 1) * 20),
+                    "payload": base64.b64encode(frame).decode(),
+                },
+            )
             played, marks = playout.play()
             recording.write(played)
             for name in marks:
-                await send("mark", mark={"name": name})
-        await send("stop", stop={"accountSid": config.ACCOUNT_SID, "callSid": call.sid})
+                outbox.put("mark", {"name": name})
+        if sender.done() or receiver.done():
+            log.info("call %s: the app closed the stream", call.sid)
+        else:
+            outbox.put("stop", {"accountSid": config.ACCOUNT_SID, "callSid": call.sid})
+            with suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(sender), FLUSH_TIMEOUT)
     finally:
+        sender.cancel()
         receiver.cancel()
-        if playout.dropped_bytes:
+        await asyncio.gather(sender, receiver, return_exceptions=True)
+        if outbox.dropped or playout.dropped_bytes:
             log.warning(
-                "call %s: dropped %d bytes over the playout cap", call.sid, playout.dropped_bytes
+                "call %s: dropped %d media frames to a slow app, %d bytes over the playout cap",
+                call.sid,
+                outbox.dropped,
+                playout.dropped_bytes,
             )
-
-
-async def run_call(
-    pool: AsyncConnectionPool, call: db.Call, owner: str, media_dir: Path, recordings_dir: Path
-) -> None:
-    with MediaReader(media_dir / f"{call.to_number}.wav") as media:
-        answered = await db.answer_call(pool, call.sid, owner)
-        if answered is None:
-            return  # another server reaped it while we were ringing
-        try:
-            async with connect(call.stream_url, open_timeout=CONNECT_TIMEOUT) as ws:
-                # Opened at `start`, so the recording lines up with the stream's timestamps.
-                with RecordingWriter(recordings_dir / f"{call.sid}.wav") as recording:
-                    await stream(ws, call, media, recording)
-        except (OSError, TimeoutError, WebSocketException) as e:
-            # The callee already answered, so a broken stream still ends `completed` (ADR-010).
-            log.warning("call %s: stream to %s ended early: %r", call.sid, call.stream_url, e)
-        await db.complete_call(pool, call.sid, owner, answered)
 
 
 class Supervisor:
@@ -156,14 +193,21 @@ class Supervisor:
         self.media_dir = media_dir
         self.recordings_dir = recordings_dir
         self.calls: set[asyncio.Task[None]] = set()
+        self._hangups: dict[str, asyncio.Event] = {}  # by CallSid, for calls we run
         self._poke = asyncio.Event()
 
     def poke(self) -> None:
         """Claim now instead of on the next poll: a call created here starts immediately."""
         self._poke.set()
 
+    def hang_up(self, sid: str) -> None:
+        """Ends a call this server runs at once; other servers see the flag on their poll."""
+        if event := self._hangups.get(sid):
+            event.set()
+
     def _done(self, task: asyncio.Task[None]) -> None:
         self.calls.discard(task)
+        self._hangups.pop(task.get_name(), None)
         if not task.cancelled() and (e := task.exception()):
             log.error("call task %s crashed", task.get_name(), exc_info=e)
         self.poke()  # a slot is free
@@ -171,20 +215,60 @@ class Supervisor:
     async def run(self) -> None:
         while True:
             self._poke.clear()  # before claiming, so a poke during the claim isn't lost
-            if (free := self.max_calls - len(self.calls)) > 0:
-                try:
-                    claimed = await db.claim_calls(self.pool, self.server_id, free)
-                except psycopg.Error:
-                    log.exception("claiming calls failed; retrying")
-                    claimed = []
-                for call in claimed:
-                    task = asyncio.create_task(
-                        run_call(
-                            self.pool, call, self.server_id, self.media_dir, self.recordings_dir
-                        ),
-                        name=call.sid,
-                    )
-                    self.calls.add(task)
-                    task.add_done_callback(self._done)
+            try:
+                if (free := self.max_calls - len(self.calls)) > 0:
+                    for call in await db.claim_calls(self.pool, self.server_id, free):
+                        self._hangups[call.sid] = asyncio.Event()
+                        task = asyncio.create_task(self._run_call(call), name=call.sid)
+                        self.calls.add(task)
+                        task.add_done_callback(self._done)
+                if self._hangups:
+                    for sid in await db.hangups_requested(self.pool, self.server_id):
+                        self.hang_up(sid)
+            except psycopg.Error:
+                log.exception("supervisor tick failed; retrying")
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._poke.wait(), POLL_SECONDS)
+
+    async def _run_call(self, call: db.Call) -> None:
+        sid, owner, hangup = call.sid, self.server_id, self._hangups[call.sid]
+        # The callee is a file: markers decide busy and no-answer (ADR-010).
+        callee = self.media_dir / call.to_number
+        if callee.with_name(f"{call.to_number}.busy").exists():
+            await db.end_unanswered(self.pool, sid, owner, "busy")
+            return
+        if callee.with_name(f"{call.to_number}.no-answer").exists():
+            with suppress(TimeoutError):
+                await asyncio.wait_for(hangup.wait(), call.ring_timeout)
+            status = "canceled" if hangup.is_set() else "no-answer"
+            await db.end_unanswered(self.pool, sid, owner, status)
+            return
+        try:
+            media = MediaReader(callee.with_name(f"{call.to_number}.wav"))
+        except (OSError, MediaFormatError) as e:
+            log.warning("call %s failed: %s", sid, e)
+            await db.end_unanswered(self.pool, sid, owner, "failed")
+            return
+
+        with media:
+            answered = await db.answer_call(self.pool, sid, owner)
+            if answered is None:
+                # Hung up while ringing (a no-op if another server reaped the call instead).
+                await db.end_unanswered(self.pool, sid, owner, "canceled")
+                return
+            try:
+                async with connect(
+                    call.stream_url,
+                    open_timeout=CONNECT_TIMEOUT,
+                    ping_interval=PING_INTERVAL,
+                    ping_timeout=PING_TIMEOUT,
+                    close_timeout=CLOSE_TIMEOUT,
+                ) as ws:
+                    # Opened at `start`, so the recording lines up with the stream's timestamps.
+                    with RecordingWriter(self.recordings_dir / f"{sid}.wav") as recording:
+                        await stream(ws, call, media, recording, hangup)
+            except (OSError, TimeoutError, WebSocketException) as e:
+                # The callee already answered, so a failed stream still ends `completed`
+                # (ADR-010).
+                log.warning("call %s: stream to %s failed: %r", sid, call.stream_url, e)
+            await db.complete_call(self.pool, sid, owner, answered)

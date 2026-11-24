@@ -1,65 +1,17 @@
 import asyncio
 import base64
 import json
-import struct
-import uuid
 import wave
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-import pytest
-from conftest import FakeApp
+from conftest import TO, FakeApp, insert, wait_for_status, write_wav
 from psycopg_pool import AsyncConnectionPool
 from websockets.asyncio.server import ServerConnection
 
 from callapi import config, db
 from callapi.main import call_json
 from callapi.runner import Supervisor
-
-TO = "+15550001"
-
-
-def write_wav(path: Path, seconds: float, rate: int = 8000) -> None:
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(struct.pack("<h", 1000) * int(rate * seconds))
-
-
-async def insert(pool: AsyncConnectionPool, url: str, to: str = TO) -> db.Call:
-    return await db.insert_call(
-        pool,
-        sid=f"CA{uuid.uuid4().hex}",
-        to=to,
-        from_="+15550000",
-        stream_url=url,
-        stream_params={"mode": "normal"},
-        status_callback=None,
-        status_callback_method="POST",
-        status_callback_events=["completed"],
-        ring_timeout=60,
-    )
-
-
-async def wait_for_status(pool: AsyncConnectionPool, sid: str, status: str) -> db.Call:
-    async with asyncio.timeout(10):
-        while (call := await db.get_call(pool, sid)) is None or call.status != status:  # noqa: ASYNC110 - status lives in Postgres
-            await asyncio.sleep(0.05)
-    return call
-
-
-@pytest.fixture
-async def supervisor(pool: AsyncConnectionPool, tmp_path: Path) -> AsyncIterator[Supervisor]:
-    sup = Supervisor(
-        pool, server_id="test-server", max_calls=10, media_dir=tmp_path, recordings_dir=tmp_path
-    )
-    task = asyncio.create_task(sup.run())
-    yield sup
-    for t in (task, *sup.calls):
-        t.cancel()
-    await asyncio.gather(task, *sup.calls, return_exceptions=True)
 
 
 async def test_two_second_file_streams_100_frames_then_completes(

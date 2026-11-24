@@ -22,6 +22,7 @@ class Call:
     status_callback_events: list[str]
     ring_timeout: int
     owner: str | None
+    hangup_requested: bool
     callback_seq: int
     date_created: datetime
     date_updated: datetime
@@ -129,12 +130,13 @@ async def claim_calls(pool: AsyncConnectionPool, owner: str, limit: int) -> list
 
 
 async def answer_call(pool: AsyncConnectionPool, sid: str, owner: str) -> datetime | None:
-    """Marks the call in-progress; returns the answer time, or None if we lost ownership."""
+    """Marks the call in-progress; returns the answer time, or None if it was hung up while
+    ringing or another server took it over."""
     async with pool.connection() as conn:
         cur = await conn.execute(
             """
             UPDATE calls SET status = 'in-progress', date_updated = now()
-            WHERE sid = %s AND owner = %s AND status = 'ringing'
+            WHERE sid = %s AND owner = %s AND status = 'ringing' AND NOT hangup_requested
             RETURNING date_updated
             """,
             (sid, owner),
@@ -158,3 +160,52 @@ async def complete_call(
             (answered, sid, owner),
         )
     return cur.rowcount == 1
+
+
+async def end_unanswered(pool: AsyncConnectionPool, sid: str, owner: str, status: str) -> None:
+    """busy, no-answer, failed or canceled: no end_time or duration, as Twilio documents."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            """
+            UPDATE calls SET status = %s, date_updated = now()
+            WHERE sid = %s AND owner = %s AND status = 'ringing'
+            """,
+            (status, sid, owner),
+        )
+
+
+async def hang_up(pool: AsyncConnectionPool, sid: str, status: str) -> Call | None:
+    """API update with Status=completed|canceled (ASSUMPTIONS 7). A queued call is canceled
+    here; a live one is flagged for its owner. Returns the call, or None if unknown."""
+    live = ["ringing", "in-progress"] if status == "completed" else ["ringing"]
+    async with pool.connection() as conn:
+        cur = conn.cursor(row_factory=class_row(Call))
+        await cur.execute(
+            """
+            UPDATE calls SET status = 'canceled', date_updated = now()
+            WHERE sid = %s AND status = 'queued'
+            RETURNING *
+            """,
+            (sid,),
+        )
+        if row := await cur.fetchone():
+            return row
+        # Not queued (any more): a claim may have won the race, so flag it for the owner.
+        await cur.execute(
+            "UPDATE calls SET hangup_requested = true WHERE sid = %s AND status = ANY(%s)",
+            (sid, live),
+        )
+        await cur.execute("SELECT * FROM calls WHERE sid = %s", (sid,))
+        return await cur.fetchone()
+
+
+async def hangups_requested(pool: AsyncConnectionPool, owner: str) -> list[str]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            SELECT sid FROM calls
+            WHERE owner = %s AND hangup_requested AND status IN ('ringing', 'in-progress')
+            """,
+            (owner,),
+        )
+        return [sid for (sid,) in await cur.fetchall()]

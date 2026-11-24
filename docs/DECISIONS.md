@@ -74,6 +74,8 @@ Short ADRs, one per decision. Format: context → choice → why → rejected. W
   - The pacer pushes into a bounded deque of 50 messages (~1s), which a separate sender task drains.
   - When the deque is full, we drop the **oldest media** frame (never a `mark` or `stop`) and count the drop.
   - The `websockets` keepalive ping (20s) closes a dead app, which counts as the app closing the stream.
+  - `close_timeout` is 2s, not websockets' 10s default. After a missed pong the close frame can't drain to an app that isn't reading, and the socket is only aborted once `close_timeout` passes, so the default would hold a dead call open 10s longer.
+  - `sequenceNumber` is assigned when a message is sent, so dropped media leaves no gaps. The gap shows in `chunk`, which is the honest signal that audio was lost.
 - **Why:**
   - The pacer, the marks and the recording never wait on the app.
   - Stale audio is worthless to a voice agent.

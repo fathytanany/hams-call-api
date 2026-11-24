@@ -252,3 +252,56 @@ def test_recording_is_listed_fetched_and_downloaded_once_the_call_ends(
 def test_unknown_recordings_are_not_found(client: TestClient, path: str) -> None:
     r = client.get(BASE + path)
     assert (r.status_code, r.json()["code"]) == (404, 20404)
+
+
+def set_status(sid: str, status: str) -> None:
+    with psycopg.connect(config.DATABASE_URL, autocommit=True) as conn:
+        conn.execute("UPDATE calls SET status = %s WHERE sid = %s", (status, sid))
+
+
+def hangup_requested(sid: str) -> bool:
+    with psycopg.connect(config.DATABASE_URL) as conn:
+        row = conn.execute("SELECT hangup_requested FROM calls WHERE sid = %s", (sid,)).fetchone()
+    assert row is not None
+    return bool(row[0])
+
+
+@pytest.mark.parametrize("status", ["canceled", "completed"])
+def test_ending_a_queued_call_cancels_it(client: TestClient, status: str) -> None:
+    sid = create(client).json()["sid"]
+    r = client.post(f"{BASE}/Calls/{sid}.json", data={"Status": status})
+    assert (r.status_code, r.json()["status"]) == (200, "canceled")
+    assert r.json()["end_time"] is r.json()["duration"] is None
+
+
+@pytest.mark.parametrize(
+    ("current", "requested", "flagged"),
+    [
+        ("in-progress", "completed", True),  # the owner hangs up within 1s
+        ("in-progress", "canceled", False),  # canceled only applies before answer: no-op
+        ("ringing", "canceled", True),
+        ("completed", "completed", False),  # already ended: unchanged
+        ("busy", "canceled", False),
+    ],
+)
+def test_ending_a_live_or_ended_call(
+    client: TestClient, current: str, requested: str, flagged: bool
+) -> None:
+    sid = create(client).json()["sid"]
+    set_status(sid, current)
+    r = client.post(f"{BASE}/Calls/{sid}.json", data={"Status": requested})
+    assert (r.status_code, r.json()["status"]) == (200, current)
+    assert hangup_requested(sid) is flagged
+
+
+@pytest.mark.parametrize("data", [{}, {"Status": "in-progress"}, {"Twiml": "<Response/>"}])
+def test_update_only_ends_calls(client: TestClient, data: dict[str, str]) -> None:
+    sid = create(client).json()["sid"]
+    r = client.post(f"{BASE}/Calls/{sid}.json", data=data)
+    assert r.status_code == 400
+    assert "only ending a call is supported" in r.json()["message"]
+
+
+def test_updating_an_unknown_call_is_not_found(client: TestClient) -> None:
+    r = client.post(f"{BASE}/Calls/CA{'0' * 32}.json", data={"Status": "completed"})
+    assert (r.status_code, r.json()["code"]) == (404, 20404)

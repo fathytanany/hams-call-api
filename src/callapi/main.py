@@ -185,16 +185,27 @@ def parse_int(name: str, raw: str, minimum: int) -> int:
     return n
 
 
-@app.post(f"{ACCOUNT}/Calls.json", status_code=201, dependencies=[Auth])
-async def create_call(request: Request, pool: Pool) -> dict[str, Any]:
+Form = dict[str, list[str]]
+
+
+async def read_form(request: Request) -> Form:
     # Parsed by hand: StatusCallbackEvent may repeat, and this avoids python-multipart.
     try:
-        form = parse_qs((await request.body()).decode(), keep_blank_values=True)
+        return parse_qs((await request.body()).decode(), keep_blank_values=True)
     except UnicodeDecodeError:
         raise bad_request("Request body must be UTF-8 form data") from None
 
+
+def last(form: Form, name: str) -> str:
+    return form.get(name, [""])[-1].strip()
+
+
+@app.post(f"{ACCOUNT}/Calls.json", status_code=201, dependencies=[Auth])
+async def create_call(request: Request, pool: Pool) -> dict[str, Any]:
+    form = await read_form(request)
+
     def one(name: str) -> str:
-        return form.get(name, [""])[-1].strip()
+        return last(form, name)
 
     to, from_ = one("To"), one("From")
     if not to:
@@ -251,6 +262,23 @@ async def fetch_call(call_sid: str, pool: Pool) -> dict[str, Any]:
     call = await db.get_call(pool, call_sid)
     if call is None:
         raise HTTPException(404)
+    return call_json(call)
+
+
+@app.post(f"{ACCOUNT}/Calls/{{call_sid}}.json", dependencies=[Auth])
+async def update_call(call_sid: str, request: Request, pool: Pool) -> dict[str, Any]:
+    """Ends a call (ASSUMPTIONS 7). Redirecting it with new TwiML is out of scope."""
+    status = last(await read_form(request), "Status")
+    if status not in ("completed", "canceled"):
+        raise bad_request(
+            f"Status must be 'completed' or 'canceled', got {status!r}; "
+            "only ending a call is supported"
+        )
+    call = await db.hang_up(pool, call_sid, status)
+    if call is None:
+        raise HTTPException(404)
+    # Instant if this server runs the call; otherwise its owner sees the flag within 1s.
+    request.app.state.supervisor.hang_up(call_sid)
     return call_json(call)
 
 

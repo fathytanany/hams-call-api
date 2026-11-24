@@ -1,4 +1,4 @@
-.PHONY: run test lint check db
+.PHONY: run test lint check db demo
 
 db:
 	docker compose up -d --wait db
@@ -15,3 +15,7 @@ lint:
 	uv run mypy
 
 check: lint test
+
+# Needs `docker compose up` running: the API dials the compose test app.
+demo:
+	uv run python scripts/demo.py --calls $(or $(CALLS),20)

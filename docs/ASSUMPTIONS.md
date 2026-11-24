@@ -59,5 +59,5 @@ The spec is intentionally incomplete, and Twilio's docs leave some behavior unst
 30. **`RecordingUrl` host.** Built from `PUBLIC_URL` (default `http://localhost:8000`), because the runner has no request to take a host from.
 
 ## Multi-server
-26. **Heartbeat timing.** Each server heartbeats every 1s and is considered dead after 10s without one. A false positive (a long GC pause or a network partition) is contained by owner fencing: the paused server's writes match 0 rows, so it stops those calls.
+26. **Heartbeat timing.** Each server heartbeats every 1s and is considered dead after 10s without one. A false positive (a long GC pause or a network partition) is contained by owner fencing: the paused server's writes match 0 rows, so it stops those calls. A server reaps only after 10s of its own heartbeats succeeding, so a database outage, which leaves every heartbeat stale, doesn't end the calls of servers that are still alive (ADR-004).
 27. **Shared files.** All servers see the same `media/` and `recordings/` (a shared volume in compose). In production this would be object storage.

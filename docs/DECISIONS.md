@@ -54,6 +54,7 @@ Short ADRs, one per decision. Format: context → choice → why → rejected. W
   - One statement reaps: a CTE deletes the dead server's row and feeds the `UPDATE` of its calls. Deleting the row is the claim, so when two peers reap at once the second finds nothing.
   - The `completed` callback continues the dead owner's `SequenceNumber`, derived from how far the call got (ADR-009).
   - A reaped server that wakes up learns it from its heartbeat: the `UPDATE` of its own row matches 0 rows. It then ends every call it still runs: the app gets `stop`, and its final writes are fenced off, so the reaper's record stands. It re-registers and carries on claiming.
+  - A server reaps only after its own heartbeat has succeeded for 10s in a row. A database outage leaves every heartbeat stale, live peers' included; the first server back would otherwise reap them all and end every call they run. Waiting as long as the dead threshold gives each live peer the same time to beat. A server that just started waits the same 10s.
 - **Accepted cost:** `end_time` is the last heartbeat, so a reaped call's `duration` can undercount by up to the 1s heartbeat interval. The recording holds whatever the dead server wrote before dying.
 - **Why:** It's Twilio-like: an answered call that drops ends as `completed`. No audio is invented and the app sees only one stream.
 - **Rejected:**

@@ -32,7 +32,10 @@ class Call:
 
 
 async def apply_schema(pool: AsyncConnectionPool) -> None:
+    """Servers starting together would race: concurrent CREATE ... IF NOT EXISTS on an
+    empty database fails with a unique violation. The lock is held until commit."""
     async with pool.connection() as conn:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('callapi.schema'))")
         await conn.execute(SCHEMA.read_text())
 
 

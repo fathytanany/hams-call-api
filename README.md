@@ -20,7 +20,7 @@ Place a call (dev credentials from `src/callapi/config.py`; override with `ACCOU
 ```bash
 curl -u AC00000000000000000000000000000001:dev-auth-token \
   http://localhost:8000/2010-04-01/Accounts/AC00000000000000000000000000000001/Calls.json \
-  -d To=+15550001 -d From=+15550000 \
+  --data-urlencode To=+15550001 --data-urlencode From=+15550000 \
   --data-urlencode 'Twiml=<Response><Connect><Stream url="ws://testapp:8765/stream"/></Connect></Response>'
 ```
 

@@ -97,11 +97,11 @@ Checks:
 - [x] `make check` green, committed
 
 ## 9. Design doc (45m)
-- [ ] `docs/DESIGN.md`, at most 2 pages:
+- [x] `docs/DESIGN.md`, at most 2 pages:
   - what's supported and how close it is to Twilio
   - real-time pacing and slow / disconnecting / never-answering apps
   - component failure and a server dying
   - what changes at 1,000 calls, and what's next
   - what we chose not to do
-- [ ] README: run, test, demo commands
-- [ ] Committed
+- [x] README: run, test, demo commands
+- [x] Committed

@@ -13,17 +13,33 @@ services:
       timeout: 3s
       retries: 30
 
-  api:
+  # Two API servers on one database: each claims calls up to MAX_CALLS and reaps the
+  # other's calls if it dies (ADR-003, ADR-004). Any server serves any call or recording.
+  api1:
     build: .
     ports:
       - "8000:8000"
-    environment:
+    environment: &api-env
       DATABASE_URL: postgresql://callapi:callapi@db:5432/callapi
+      MAX_CALLS: ${MAX_CALLS:-500}
     depends_on:
       db:
         condition: service_healthy
-    volumes:
+    volumes: &api-volumes
       - ./media:/app/media:ro
+      - recordings:/app/recordings  # shared, so a peer can finish a dead server's files
+
+  api2:
+    build: .
+    ports:
+      - "8001:8000"
+    environment:
+      <<: *api-env
+      PUBLIC_URL: http://localhost:8001
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes: *api-volumes
 
   # The demo app the API dials (scripts/demo.py points calls at ws://testapp:8765).
   testapp:
@@ -33,3 +49,6 @@ services:
       OUT_DIR: /app/out
     volumes:
       - ./out:/app/out
+
+volumes:
+  recordings:

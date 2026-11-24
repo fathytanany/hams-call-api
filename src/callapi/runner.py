@@ -20,12 +20,19 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from callapi import callbacks, config, db
-from callapi.audio import MediaFormatError, MediaReader, Playout, RecordingWriter
+from callapi.audio import (
+    MediaFormatError,
+    MediaReader,
+    Playout,
+    RecordingWriter,
+    patch_wav_header,
+)
 
 log = logging.getLogger(__name__)
 
 FRAME_SECONDS = 0.02
-POLL_SECONDS = 1.0  # claim and hangup-flag interval when nobody pokes us (ADR-003)
+# Claim, hangup-flag, heartbeat and reap interval when nobody pokes us (ADR-003).
+POLL_SECONDS = 1.0
 CONNECT_TIMEOUT = 10.0  # ASSUMPTIONS 12
 # websockets' keepalive: an app that stops reading stops answering pings and is closed.
 PING_INTERVAL = 20.0
@@ -214,6 +221,12 @@ class Supervisor:
         if event := self._hangups.get(sid):
             event.set()
 
+    def _callbacks(self, call: db.Call, seq: int = 0) -> callbacks.StatusCallbacks:
+        status_callbacks = callbacks.StatusCallbacks(call, self.http, seq)
+        self.callbacks.add(status_callbacks.task)
+        status_callbacks.task.add_done_callback(self.callbacks.discard)
+        return status_callbacks
+
     def _done(self, task: asyncio.Task[None]) -> None:
         self.calls.discard(task)
         self._hangups.pop(task.get_name(), None)
@@ -231,6 +244,12 @@ class Supervisor:
         while True:
             self._poke.clear()  # before claiming, so a poke during the claim isn't lost
             try:
+                if not await db.heartbeat(self.pool, self.server_id) and self._hangups:
+                    # Peers wrote us off (a long pause or a partition) and already ended
+                    # these calls; our own writes would match 0 rows, so stop streaming.
+                    log.error("declared dead by peers; stopping %d calls", len(self._hangups))
+                    for event in self._hangups.values():
+                        event.set()
                 if (free := self.max_calls - len(self.calls)) > 0:
                     for call in await db.claim_calls(self.pool, self.server_id, free):
                         self._hangups[call.sid] = asyncio.Event()
@@ -240,15 +259,37 @@ class Supervisor:
                 if self._hangups:
                     for sid in await db.hangups_requested(self.pool, self.server_id):
                         self.hang_up(sid)
+                await self.reap()
             except psycopg.Error:
                 log.exception("supervisor tick failed; retrying")
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._poke.wait(), POLL_SECONDS)
 
+    async def reap(self) -> None:
+        """Ends the calls of dead peers as their owner would have (ADR-004)."""
+        for call in await db.reap_dead_servers(self.pool):
+            log.warning("call %s: its server died; ended as %s", call.sid, call.status)
+            answered = call.status == "completed"
+            # Callbacks the dead owner fired; events go in a fixed order, so the count
+            # follows from how far the call got (ADR-009).
+            fired = ("initiated", "ringing", "answered") if answered else ("initiated", "ringing")
+            seq = sum(e in call.status_callback_events for e in fired)
+            status_callbacks = self._callbacks(call, seq)
+            if answered:
+                assert call.duration is not None  # set by the reap for answered calls
+                recording = self.recordings_dir / f"{call.sid}.wav"
+                try:
+                    patch_wav_header(recording)  # the owner died before close() fixed it
+                except OSError as e:  # never opened, or unreadable: the call still ends
+                    log.warning("call %s: no recording to patch: %s", call.sid, e)
+                extra = callbacks.completed(call.sid, call.duration, recording)
+                status_callbacks.fire("completed", "completed", extra)
+            else:
+                status_callbacks.fire("completed", call.status, callbacks.unanswered(call.status))
+            status_callbacks.close()
+
     async def _run_call(self, call: db.Call) -> None:
-        status_callbacks = callbacks.StatusCallbacks(call, self.http)
-        self.callbacks.add(status_callbacks.task)
-        status_callbacks.task.add_done_callback(self.callbacks.discard)
+        status_callbacks = self._callbacks(call)
         # Claimed means dialing and ringing at once (TWILIO_CONTRACT §2).
         status_callbacks.fire("initiated", "initiated")
         status_callbacks.fire("ringing", "ringing")

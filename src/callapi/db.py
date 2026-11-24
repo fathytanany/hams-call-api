@@ -213,3 +213,50 @@ async def hangups_requested(pool: AsyncConnectionPool, owner: str) -> list[str]:
             (owner,),
         )
         return [sid for (sid,) in await cur.fetchall()]
+
+
+async def heartbeat(pool: AsyncConnectionPool, server_id: str) -> bool:
+    """Marks this server alive. False if its row was missing: the first beat, or peers
+    declared it dead and reaped its calls (ADR-004), which the caller must stop."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "UPDATE servers SET heartbeat_at = now() WHERE id = %s", (server_id,)
+        )
+        if cur.rowcount == 1:
+            return True
+        await conn.execute("INSERT INTO servers (id) VALUES (%s)", (server_id,))
+    return False
+
+
+async def reap_dead_servers(pool: AsyncConnectionPool) -> list[Call]:
+    """Ends the calls of servers silent for 10s (ASSUMPTIONS 26) and returns them.
+
+    One statement: deleting the server row is the claim on its calls, so when two peers
+    reap at once the second finds nothing. An answered call ends `completed` at the last
+    heartbeat, a ringing one `failed` (ADR-004). Queued calls have no owner to lose.
+    """
+    async with pool.connection() as conn:
+        cur = conn.cursor(row_factory=class_row(Call))
+        await cur.execute(
+            """
+            WITH dead AS (
+                DELETE FROM servers WHERE heartbeat_at < now() - interval '10 seconds'
+                RETURNING id, heartbeat_at
+            )
+            UPDATE calls c
+            SET status = CASE c.status WHEN 'in-progress' THEN 'completed' ELSE 'failed' END,
+                -- An in-progress call's date_updated is its answer time: nothing writes
+                -- it until it ends. It may have answered after its last beat, so never
+                -- end before that.
+                end_time = CASE WHEN c.status = 'in-progress'
+                    THEN greatest(d.heartbeat_at, c.date_updated) END,
+                duration = CASE WHEN c.status = 'in-progress'
+                    THEN round(extract(epoch FROM
+                        greatest(d.heartbeat_at, c.date_updated) - c.date_updated))::int END,
+                date_updated = now()
+            FROM dead d
+            WHERE c.owner = d.id AND c.status IN ('ringing', 'in-progress')
+            RETURNING c.*
+            """
+        )
+        return await cur.fetchall()

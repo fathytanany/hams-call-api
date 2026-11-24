@@ -79,9 +79,11 @@ class StatusCallbacks:
     """One call's callbacks. A single task sends them in order, so `ringing` never overtakes
     `initiated`, and the call never waits on the receiver (ADR-009)."""
 
-    def __init__(self, call: db.Call, client: httpx.AsyncClient) -> None:
+    def __init__(self, call: db.Call, client: httpx.AsyncClient, seq: int = 0) -> None:
         self._call, self._client = call, client
-        self._seq = 0  # SequenceNumber: callbacks fired for this call, from 0
+        # SequenceNumber: callbacks fired for this call, from 0. A reaper starts after
+        # the ones the dead owner fired.
+        self._seq = seq
         self._queue: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
         self.task = asyncio.create_task(self._send(), name=f"callbacks-{call.sid}")
 

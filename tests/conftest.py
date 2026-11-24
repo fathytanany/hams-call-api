@@ -117,6 +117,7 @@ async def insert(
     status_callback: str | None = None,
     method: str = "POST",
     events: tuple[str, ...] = ("completed",),
+    params: dict[str, str] | None = None,
 ) -> db.Call:
     return await db.insert_call(
         pool,
@@ -124,7 +125,7 @@ async def insert(
         to=to,
         from_="+15550000",
         stream_url=url,
-        stream_params={"mode": "normal"},
+        stream_params=params or {"mode": "normal"},
         status_callback=status_callback,
         status_callback_method=method,
         status_callback_events=list(events),

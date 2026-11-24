@@ -32,3 +32,8 @@ CREATE TABLE IF NOT EXISTS calls (
 
 -- List order is newest first; sid breaks ties so offset paging is stable.
 CREATE INDEX IF NOT EXISTS calls_created_idx ON calls (date_created DESC, sid DESC);
+-- Every server claims and polls hangups each second. Ended calls pile up forever, so
+-- index only the few rows those polls can match.
+CREATE INDEX IF NOT EXISTS calls_queued_idx ON calls (date_created) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS calls_live_owner_idx ON calls (owner)
+    WHERE status IN ('ringing', 'in-progress');

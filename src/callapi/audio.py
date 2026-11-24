@@ -1,14 +1,15 @@
-"""Callee WAV files in, 20 ms frames of 8 kHz mu-law out (the Media Streams format)."""
+"""Audio at the edges of a call: callee WAV -> mu-law frames, app mu-law -> recording WAV."""
 
 import audioop
+import struct
 import wave
 from pathlib import Path
-from types import TracebackType
 from typing import Self
 
 RATE = 8000
 FRAME_BYTES = RATE * 20 // 1000  # 160 samples, one mu-law byte each
 ULAW_SILENCE = b"\xff"
+HEADER_BYTES = 44
 
 
 class MediaFormatError(ValueError):
@@ -55,10 +56,45 @@ class MediaReader:
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def _wav_header(data_bytes: int) -> bytes:
+    """Canonical 44-byte header for 16-bit mono PCM at 8 kHz."""
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        *(b"RIFF", 36 + data_bytes, b"WAVE"),
+        *(b"fmt ", 16, 1, 1, RATE, RATE * 2, 2, 16),  # PCM, mono, byte rate, block align, bits
+        *(b"data", data_bytes),
+    )
+
+
+def patch_wav_header(path: Path) -> None:
+    """Set the header sizes from the file length: finishes a recording whose writer died."""
+    data_bytes = max(path.stat().st_size - HEADER_BYTES, 0)
+    with path.open("r+b") as f:
+        f.write(_wav_header(data_bytes))
+
+
+class RecordingWriter:
+    """Appends mu-law frames as 16-bit PCM. Sizes are only known at the end, so close()
+    uses the same patch_wav_header a peer server runs on a dead server's recordings."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._file = path.open("wb")
+        self._file.write(_wav_header(0))
+
+    def write(self, ulaw: bytes) -> None:
+        self._file.write(audioop.ulaw2lin(ulaw, 2))
+
+    def close(self) -> None:
+        self._file.close()
+        patch_wav_header(self._path)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
         self.close()

@@ -17,11 +17,11 @@ Vertical slices of 30–60 minutes each. Every slice ends with `make check` gree
 - `patch_wav_header(path)` for files left half-written by a crash.
 
 Checks:
-- [ ] Tests written first: μ-law known values (0 → `0xFF`), round-trip error within G.711 bounds
-- [ ] A 1s 16k file and a 1s 8k file each yield exactly 50 frames of 160 bytes
-- [ ] Stereo / 8-bit / 44.1k files raise a clear error
-- [ ] A truncated recording becomes readable by `wave` after `patch_wav_header`
-- [ ] `make check` green, committed
+- [x] Tests written first: μ-law known values (0 → `0xFF`), round-trip error within G.711 bounds
+- [x] A 1s 16k file and a 1s 8k file each yield exactly 50 frames of 160 bytes
+- [x] Stereo / 8-bit / 44.1k files raise a clear error
+- [x] A truncated recording becomes readable by `wave` after `patch_wav_header`
+- [x] `make check` green, committed
 
 ## 2. DB + Calls API (60m)
 `schema.sql` (`calls`, `servers`), psycopg pool in the app lifespan, Basic auth, Twilio error bodies, create/fetch/list, TwiML parsing, Call JSON. Add a `db` service to compose; `make test` starts it.

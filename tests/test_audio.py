@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from callapi.audio import FRAME_BYTES, MediaFormatError, MediaReader
+from callapi.audio import (
+    FRAME_BYTES,
+    MediaFormatError,
+    MediaReader,
+    RecordingWriter,
+    patch_wav_header,
+)
 
 
 def write_wav(
@@ -98,3 +104,52 @@ def test_rejects_non_wav(tmp_path: Path) -> None:
 def test_missing_file_raises_oserror(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         MediaReader(tmp_path / "missing.wav")
+
+
+ULAW_FRAMES = [bytes(range(i, i + FRAME_BYTES)) for i in range(0, 90, 30)]
+
+
+def read_recording(path: Path) -> tuple[tuple[int, int, int], bytes]:
+    with wave.open(str(path), "rb") as w:
+        return (w.getnchannels(), w.getsampwidth(), w.getframerate()), w.readframes(w.getnframes())
+
+
+def test_recording_is_16bit_8k_mono_pcm_of_the_ulaw_written(tmp_path: Path) -> None:
+    path = tmp_path / "rec.wav"
+    with RecordingWriter(path) as rec:
+        for frame in ULAW_FRAMES:
+            rec.write(frame)
+    fmt, pcm = read_recording(path)
+    assert fmt == (1, 2, 8000)
+    assert pcm == audioop.ulaw2lin(b"".join(ULAW_FRAMES), 2)
+
+
+def test_patch_recovers_recording_whose_writer_died(tmp_path: Path) -> None:
+    path = tmp_path / "rec.wav"
+    with RecordingWriter(path) as rec:
+        for frame in ULAW_FRAMES:
+            rec.write(frame)
+    raw = bytearray(path.read_bytes())
+    raw[4:8] = raw[40:44] = bytes(4)  # the sizes a writer leaves when it never reaches close()
+    path.write_bytes(raw)
+
+    patch_wav_header(path)
+
+    _, pcm = read_recording(path)
+    assert pcm == audioop.ulaw2lin(b"".join(ULAW_FRAMES), 2)
+
+
+def test_patch_turns_headerless_file_into_empty_wav(tmp_path: Path) -> None:
+    path = tmp_path / "rec.wav"
+    path.write_bytes(b"")  # died before the buffered header reached disk
+    patch_wav_header(path)
+    assert read_recording(path) == ((1, 2, 8000), b"")
+
+
+def test_patch_leaves_complete_recording_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "rec.wav"
+    with RecordingWriter(path) as rec:
+        rec.write(ULAW_FRAMES[0])
+    before = path.read_bytes()
+    patch_wav_header(path)
+    assert path.read_bytes() == before

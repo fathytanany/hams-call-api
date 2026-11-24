@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from conftest import TO, FakeApp, insert, wait_for_status, write_wav
 from psycopg_pool import AsyncConnectionPool
@@ -205,3 +206,49 @@ async def test_dead_app_is_closed_by_keepalive(
     # ping interval + ping timeout + close timeout, not the 10s of the file.
     assert time.monotonic() - started < 3
     assert "stop" not in fake_app.events()
+
+
+def flaky(monkeypatch: pytest.MonkeyPatch, name: str, failures: int) -> None:
+    """Makes db.<name> raise like an unreachable database for its first `failures` calls."""
+    real = getattr(db, name)
+    left = [failures]
+
+    async def write(*args: Any) -> Any:
+        if left[0]:
+            left[0] -= 1
+            raise psycopg.OperationalError("database is down")
+        return await real(*args)
+
+    monkeypatch.setattr(db, name, write)
+
+
+@pytest.mark.parametrize("write", ["answer_call", "complete_call"])
+async def test_status_write_survives_a_database_outage(
+    pool: AsyncConnectionPool,
+    fake_app: FakeApp,
+    supervisor: Supervisor,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write: str,
+) -> None:
+    monkeypatch.setattr(runner, "POLL_SECONDS", 0.5)
+    flaky(monkeypatch, write, failures=3)
+    write_wav(tmp_path / f"{TO}.wav", 1.0)
+    call = await start_call(pool, supervisor, fake_app.url)
+    done = await wait_for_status(pool, call.sid, "completed")
+    # The 1.5s spent retrying is not call time.
+    assert done.duration == 1
+    assert done.end_time is not None and done.start_time is not None
+
+
+async def test_unanswered_write_survives_a_database_outage(
+    pool: AsyncConnectionPool,
+    supervisor: Supervisor,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "POLL_SECONDS", 0.1)
+    flaky(monkeypatch, "end_unanswered", failures=2)
+    (tmp_path / f"{TO}.busy").touch()
+    call = await start_call(pool, supervisor, "ws://unused/s")
+    await wait_for_status(pool, call.sid, "busy")

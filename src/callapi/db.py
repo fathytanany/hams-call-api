@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from psycopg.rows import class_row
@@ -145,20 +145,21 @@ async def answer_call(pool: AsyncConnectionPool, sid: str, owner: str) -> dateti
 
 
 async def complete_call(
-    pool: AsyncConnectionPool, sid: str, owner: str, answered: datetime
+    pool: AsyncConnectionPool, sid: str, owner: str, answered: datetime, seconds: float
 ) -> int | None:
-    """Ends an answered call and returns its duration; None if another server reaped it
-    first (ADR-003 fencing)."""
+    """Ends an answered call that lasted `seconds` and returns its duration; None if another
+    server reaped it first (ADR-003 fencing). The length is measured by the caller, so a
+    write retried through a database outage doesn't count the outage as call time."""
     async with pool.connection() as conn:
         cur = await conn.execute(
             """
             UPDATE calls
-            SET status = 'completed', end_time = now(), date_updated = now(),
-                duration = round(extract(epoch FROM now() - %s))::int
+            SET status = 'completed', end_time = %s, date_updated = now(),
+                duration = round(%s)::int
             WHERE sid = %s AND owner = %s AND status = 'in-progress'
             RETURNING duration
             """,
-            (answered, sid, owner),
+            (answered + timedelta(seconds=seconds), seconds, sid, owner),
         )
         row = await cur.fetchone()
     return None if row is None else int(row[0])

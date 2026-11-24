@@ -298,11 +298,24 @@ class Supervisor:
         finally:
             status_callbacks.close()
 
+    async def _retry[T](self, sid: str, write: Callable[[], Awaitable[T]]) -> T:
+        """Retries a call's status write until the database is back: a failed write would
+        leave the call live while its owner lives, so no peer would ever reap it."""
+        while True:
+            try:
+                return await write()
+            except psycopg.Error as e:
+                log.warning("call %s: status write failed, retrying: %s", sid, e)
+                await asyncio.sleep(POLL_SECONDS)
+
     async def _end_unanswered(
         self, sid: str, status: str, status_callbacks: callbacks.StatusCallbacks
     ) -> None:
         # A callback only follows our own write, so a reaped call is never reported twice.
-        if await db.end_unanswered(self.pool, sid, self.server_id, status):
+        ended = await self._retry(
+            sid, lambda: db.end_unanswered(self.pool, sid, self.server_id, status)
+        )
+        if ended:
             status_callbacks.fire("completed", status, callbacks.unanswered(status))
 
     async def _ring_and_stream(
@@ -329,7 +342,8 @@ class Supervisor:
 
         recording_path = self.recordings_dir / f"{sid}.wav"
         with media:
-            answered = await db.answer_call(self.pool, sid, owner)
+            answered = await self._retry(sid, lambda: db.answer_call(self.pool, sid, owner))
+            answered_at = time.monotonic()
             if answered is None:
                 # Hung up while ringing (a no-op if another server reaped the call instead).
                 await self._end_unanswered(sid, "canceled", status_callbacks)
@@ -350,7 +364,10 @@ class Supervisor:
                 # The callee already answered, so a failed stream still ends `completed`
                 # (ADR-010).
                 log.warning("call %s: stream to %s failed: %r", sid, call.stream_url, e)
-            duration = await db.complete_call(self.pool, sid, owner, answered)
+            seconds = time.monotonic() - answered_at
+            duration = await self._retry(
+                sid, lambda: db.complete_call(self.pool, sid, owner, answered, seconds)
+            )
             if duration is not None:
                 status_callbacks.fire(
                     "completed", "completed", callbacks.completed(sid, duration, recording_path)

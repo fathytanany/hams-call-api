@@ -188,7 +188,7 @@ Parameters:
 | `CallDuration` | Terminal events. Seconds. |
 | `Duration` | `completed`. Minutes. |
 | `SipResponseCode` | Terminal events. Twilio's examples: `404` (unreachable) and `487` (not connected before `Timeout`). |
-| `RecordingUrl`, `RecordingSid`, `RecordingDuration` | `completed`. Twilio sends these only when `Record=true`; we always record, so we always send them. |
+| `RecordingUrl`, `RecordingSid`, `RecordingDuration` | `completed`. Twilio sends these only when `Record=true`; we always record, so we send them whenever the stream opened (a refused stream leaves no recording). |
 
 Not sent, because we have no data: `ForwardedFrom`, `CallerName`, `ParentCallSid`, the geo params, `StirStatus`.
 

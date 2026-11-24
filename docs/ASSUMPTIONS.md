@@ -54,6 +54,9 @@ The spec is intentionally incomplete, and Twilio's docs leave some behavior unst
 23. **CallStatus mapping.** `initiated` sends `CallStatus=initiated`. `answered` sends `in-progress`.
 24. **`SipResponseCode` on terminal events.** `completed` 200, `busy` 486, `no-answer` 487, `canceled` 487, `failed` 404.
 25. **Queued cancel.** Canceling a `queued` call sends no callbacks (documented Twilio behavior).
+28. **When `initiated` and `ringing` fire.** Both fire when a server claims the call, since claiming is dialing and the callee "rings" at once. A call still `queued` has fired nothing, which matches 25.
+29. **`Duration` and `CallDuration`.** `CallDuration` is whole seconds (`0` for unanswered calls). `Duration` is billed minutes, rounded up, sent on `completed` only.
+30. **`RecordingUrl` host.** Built from `PUBLIC_URL` (default `http://localhost:8000`), because the runner has no request to take a host from.
 
 ## Multi-server
 26. **Heartbeat timing.** Each server heartbeats every 1s and is considered dead after 10s without one. A false positive (a long GC pause or a network partition) is contained by owner fencing: the paused server's writes match 0 rows, so it stops those calls.

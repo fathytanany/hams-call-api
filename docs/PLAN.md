@@ -69,11 +69,11 @@ Checks:
 Ordered per-call sender, event filter, params, `SequenceNumber`, signature, timeouts and retry, GET method.
 
 Checks:
-- [ ] All four events subscribed → `initiated`, `ringing`, `in-progress`, `completed` arrive in order with `SequenceNumber` 0–3
-- [ ] Default (no events given) → only `completed`, with `CallDuration`, `Duration`, `SipResponseCode` 200 and the recording params
-- [ ] `X-Twilio-Signature` matches our HMAC computed per TWILIO_CONTRACT §6
-- [ ] A receiver that refuses the connection is retried once; a 500 response is not retried; a slow receiver doesn't delay the call
-- [ ] `make check` green, committed
+- [x] All four events subscribed → `initiated`, `ringing`, `in-progress`, `completed` arrive in order with `SequenceNumber` 0–3
+- [x] Default (no events given) → only `completed`, with `CallDuration`, `Duration`, `SipResponseCode` 200 and the recording params
+- [x] `X-Twilio-Signature` matches our HMAC computed per TWILIO_CONTRACT §6
+- [x] A receiver that refuses the connection is retried once; a 500 response is not retried; a slow receiver doesn't delay the call
+- [x] `make check` green, committed
 
 ## 7. Test app + demo (45m)
 - `testapp.py`: saves what it hears to WAV and echoes audio back with marks. Behavior is chosen through `customParameters`: `mode=normal|slow|disconnect`, `disconnect_after`.

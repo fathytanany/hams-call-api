@@ -121,14 +121,17 @@ Short ADRs, one per decision. Format: context → choice → why → rejected. W
   - Form POST, or GET when `StatusCallbackMethod` says so.
   - Signed with `X-Twilio-Signature`.
   - Twilio's default timeouts and retry policy.
-  - `SequenceNumber` is incremented in the same UPDATE as the status change.
+  - A callback fires only after our own status UPDATE matched, so a call is never reported by two servers.
+  - `SequenceNumber` is counted by the sender, not stored. Events fire in a fixed order, so the reaper can derive the `completed` number from the status it reaps (`ringing` or `in-progress`) and the subscribed events.
+  - Senders outlive their call task, so a slow receiver never holds a call slot.
 - **Why:**
   - Ordered delivery makes demos and tests deterministic.
   - Twilio apps often validate the signature and would reject unsigned requests.
 - **Rejected:**
   - A Postgres outbox: durable, but it needs a table, a poller and retry bookkeeping.
   - Fire-and-forget: least code, but `ringing` could arrive after `in-progress`.
-- **Known gap:** Queued callbacks are lost if the server dies. The reaper still sends `completed`.
+- **Known gap:** Queued callbacks are lost if the server dies or shuts down. The reaper still sends `completed`.
+- **Revised in slice 6:** this ADR first stored the next `SequenceNumber` in a `callback_seq` column. It was dropped once the number proved derivable: one less piece of state to keep in step.
 
 ## ADR-010 What triggers each failure status
 - **Context:** On Twilio the callee answers first, then the TwiML runs and the stream opens. Here the callee is the WAV file.

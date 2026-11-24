@@ -223,6 +223,8 @@ async def create_call(request: Request, pool: Pool) -> dict[str, Any]:
         raise bad_request(f"The 'To' number {to} is not a valid phone number.", 21211)
     if not PHONE.fullmatch(from_):
         raise bad_request(f"The 'From' number {from_} is not a valid phone number.", 21212)
+    # E.164, as Twilio returns them; also undoes an unencoded `+` decoded as a space.
+    to, from_ = f"+{to.lstrip('+')}", f"+{from_.lstrip('+')}"
 
     for unsupported in ("Url", "ApplicationSid"):
         if one(unsupported):

@@ -3,6 +3,7 @@ import wave
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import psycopg
 import pytest
@@ -46,6 +47,18 @@ def test_create_returns_queued_call_with_all_fields(client: TestClient) -> None:
     assert call["date_created"].endswith(" +0000")
     assert parsedate_to_datetime(call["date_created"]).tzinfo is not None
     assert call["start_time"] is call["duration"] is call["price"] is None
+
+
+def test_numbers_are_normalized_to_e164(client: TestClient) -> None:
+    # `curl -d To=+1555…` sends a raw `+`, which form decoding turns into a space.
+    r = client.post(
+        f"{BASE}/Calls.json",
+        content=f"To=+15550001&From=15550000&Twiml={quote(TWIML)}",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert r.status_code == 201
+    assert r.json()["to"] == "+15550001"  # the callee file is media/+15550001.wav
+    assert r.json()["from"] == "+15550000"
 
 
 def test_fetch_returns_the_created_call(client: TestClient) -> None:

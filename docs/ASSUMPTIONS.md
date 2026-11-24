@@ -4,7 +4,7 @@ The spec is intentionally incomplete, and Twilio's docs leave some behavior unst
 
 ## Accounts and API
 1. **Accounts.** A single account. `ACCOUNT_SID` and `AUTH_TOKEN` come from the environment. If the path's `AccountSid` doesn't match the authenticated one we return 404 (20404), so we don't reveal that other accounts exist.
-2. **Valid `To` numbers.** `To` must match `^\+?\d{1,15}$`, otherwise 400 (21211). It is used as a file name (`media/{To}.wav`), so this check is the path-traversal guard. `From` gets the same format check but is not checked against owned numbers.
+2. **Valid `To` numbers.** `To` must match `^\+?\d{1,15}$`, otherwise 400 (21211). It is used as a file name (`media/{To}.wav`), so this check is the path-traversal guard. `From` gets the same format check but is not checked against owned numbers. Both are stored in E.164 with a leading `+` (`15550001` → `+15550001`), as Twilio returns them; this also rescues `curl -d To=+1…`, whose unencoded `+` arrives as a space.
 3. **Call instructions.** Only `Twiml` is accepted. `Url` and `ApplicationSid` get a 400 saying they are unsupported. Missing `Twiml` gets 400 (21205).
 4. **Unsupported TwiML.** It is rejected at create with a 400. Twilio would accept the call and fail at runtime; failing fast is more useful for an emulator. `Twiml` is limited to 4000 chars (Twilio's limit), which also bounds XML parsing cost.
 5. **Stream URL scheme.** `ws://` is accepted as well as `wss://`, so the local test app runs without TLS.

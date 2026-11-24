@@ -56,14 +56,14 @@ Checks:
 
 ## 5. Endings and failure paths (60m)
 Checks:
-- [ ] API `Status=completed` mid-call → `stop` sent, socket closed, `completed` within ≤1s
-- [ ] `Status=canceled` while queued → `canceled`; while in-progress → no-op
-- [ ] App closes the socket → `completed`, no `stop`
-- [ ] No WAV, or a bad WAV → `failed`; `.busy` → `busy`; `.no-answer` + `Timeout=2` → `no-answer` after about 2s
-- [ ] App refuses the connection, or never completes the handshake → `completed`, with the error logged
-- [ ] Slow app (reads at half speed) → drops counted, the pacer stays on schedule, the recording is unaffected
-- [ ] Dead app (stops reading, socket left open) → keepalive closes it → `completed`
-- [ ] `make check` green, committed
+- [x] API `Status=completed` mid-call → `stop` sent, socket closed, `completed` within ≤1s
+- [x] `Status=canceled` while queued → `canceled`; while in-progress → no-op
+- [x] App closes the socket → `completed`, no `stop`
+- [x] No WAV, or a bad WAV → `failed`; `.busy` → `busy`; `.no-answer` + `Timeout=2` → `no-answer` after about 2s
+- [x] App refuses the connection, or never completes the handshake → `completed`, with the error logged
+- [x] Slow app (reads at half speed) → drops counted, the pacer stays on schedule, the recording is unaffected
+- [x] Dead app (stops reading, socket left open) → keepalive closes it → `completed`
+- [x] `make check` green, committed
 
 ## 6. Status callbacks (45m)
 Ordered per-call sender, event filter, params, `SequenceNumber`, signature, timeouts and retry, GET method.

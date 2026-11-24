@@ -13,6 +13,8 @@ The spec is intentionally incomplete, and Twilio's docs leave some behavior unst
    - `Status=completed` on a `queued` or `ringing` call → `canceled`.
    - `Status=canceled` on an `in-progress` call → no-op, returns 200.
    - Any update to a call that has already ended → 200 with the call unchanged.
+   - Ending a live call returns it as it is at that moment, usually still `in-progress`. The server running the call ends it at once if the request landed there, otherwise within ≤1s. A `hangup_requested` flag in Postgres carries the request to the owner.
+   - Redirecting a call with `Url` / `Twiml` is not supported → 400.
 8. **Paging.** `Page` and `PageSize` are offset-based, newest call first. `next_page_uri` carries `Page`, `PageSize` and the active filters, and clients follow it verbatim. A call created between page fetches shifts later pages by one; a real `PageToken` cursor would fix that (ADR-013 leaves it out). `PageSize` above 1000 is clamped to 1000.
 9. **Fixed fields.** `direction` is `outbound-api`, `price` is `null`, `price_unit` is `USD`, and `to_formatted` / `from_formatted` echo the input.
 

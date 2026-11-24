@@ -1,4 +1,7 @@
+import io
+import wave
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -6,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from callapi import config
+from callapi.audio import RecordingWriter
 
 BASE = f"/2010-04-01/Accounts/{config.ACCOUNT_SID}"
 TWIML = (
@@ -183,3 +187,68 @@ def test_unsupported_method_is_twilio_shaped(client: TestClient) -> None:
     r = client.delete(f"{BASE}/Calls.json")
     assert r.status_code == 405
     assert set(r.json()) == {"message", "status"}
+
+
+RECORDING_FIELDS = {
+    "sid", "account_sid", "api_version", "call_sid", "conference_sid", "date_created",
+    "date_updated", "start_time", "duration", "price", "price_unit", "status", "channels",
+    "source", "error_code", "uri", "encryption_details", "subresource_uris", "media_url",
+}  # fmt: skip
+
+
+def test_recording_is_listed_fetched_and_downloaded_once_the_call_ends(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path)
+    sid = create(client).json()["sid"]
+    re_sid = f"RE{sid[2:]}"
+    with RecordingWriter(tmp_path / f"{sid}.wav") as w:
+        for _ in range(100):  # 2s
+            w.write(b"\x00" * 160)
+    listing = f"{BASE}/Calls/{sid}/Recordings.json"
+
+    # Still in progress: the file may be half-written, so it isn't listed yet.
+    assert client.get(listing).json()["recordings"] == []
+    assert client.get(f"{BASE}/Recordings/{re_sid}.wav").status_code == 404
+
+    with psycopg.connect(config.DATABASE_URL, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE calls SET status = 'completed', start_time = now(), end_time = now()"
+            " WHERE sid = %s",
+            (sid,),
+        )
+    body = client.get(listing).json()
+    [rec] = body["recordings"]
+    assert set(rec) == RECORDING_FIELDS
+    assert (body["page"], body["next_page_uri"]) == (0, None)
+    assert rec["sid"] == re_sid and rec["call_sid"] == sid
+    assert (rec["duration"], rec["status"], rec["channels"]) == ("2", "completed", 1)
+    assert rec["source"] == "OutboundAPI"
+    assert rec["uri"] == f"{BASE}/Recordings/{re_sid}.json"
+    assert rec["media_url"] == f"http://testserver{BASE}/Recordings/{re_sid}"
+
+    assert client.get(f"{BASE}/Recordings/{re_sid}.json").json() == rec
+    for suffix in (".wav", ""):
+        r = client.get(f"{BASE}/Recordings/{re_sid}{suffix}")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "audio/x-wav"
+        with wave.open(io.BytesIO(r.content)) as w:
+            assert (w.getframerate(), w.getsampwidth(), w.getnframes()) == (8000, 2, 16000)
+
+    client.auth = None
+    assert client.get(f"{BASE}/Recordings/{re_sid}.wav").status_code == 401
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/Calls/CA{'0' * 32}/Recordings.json",
+        f"/Recordings/RE{'0' * 32}.json",
+        f"/Recordings/RE{'0' * 32}",
+        "/Recordings/RE..%2F..%2Fetc%2Fpasswd.wav",
+        "/Recordings/..%2F..%2Fpyproject.toml",
+    ],
+)
+def test_unknown_recordings_are_not_found(client: TestClient, path: str) -> None:
+    r = client.get(BASE + path)
+    assert (r.status_code, r.json()["code"]) == (404, 20404)

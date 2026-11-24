@@ -48,11 +48,11 @@ Checks:
 Receiver task, playout buffer, marks and `clear`, per-tick recording, the Recordings endpoints.
 
 Checks:
-- [ ] Echo app → recording length equals call length, and contains the app's audio with silence where it was quiet
-- [ ] A mark sent after 1s of audio comes back about 1s later; a mark with nothing buffered comes back on the next tick
-- [ ] `clear` returns pending marks immediately and the cleared audio is not in the recording
-- [ ] `GET …/Calls/{CA}/Recordings.json` and `GET …/Recordings/{RE}.wav` return Twilio-shaped JSON and a valid WAV
-- [ ] `make check` green, committed
+- [x] Echo app → recording length equals call length, and contains the app's audio with silence where it was quiet
+- [x] A mark sent after 1s of audio comes back about 1s later; a mark with nothing buffered comes back on the next tick
+- [x] `clear` returns pending marks immediately and the cleared audio is not in the recording
+- [x] `GET …/Calls/{CA}/Recordings.json` and `GET …/Recordings/{RE}.wav` return Twilio-shaped JSON and a valid WAV
+- [x] `make check` green, committed
 
 ## 5. Endings and failure paths (60m)
 Checks:

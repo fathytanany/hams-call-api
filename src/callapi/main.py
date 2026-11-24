@@ -7,16 +7,18 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from email.utils import format_datetime
+from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from psycopg_pool import AsyncConnectionPool
 from starlette.exceptions import HTTPException
 
 from callapi import config, db, twiml
+from callapi.audio import HEADER_BYTES, RATE
 from callapi.runner import Supervisor
 
 API = "/2010-04-01"
@@ -26,6 +28,9 @@ PHONE = re.compile(r"\+?\d{1,15}")
 EVENTS = ("initiated", "ringing", "answered", "completed")
 MAX_TIMEOUT = 600
 MAX_PAGE_SIZE = 1000
+ENDED = ("completed", "busy", "no-answer", "failed", "canceled")
+# The RE sid is the call's hex (ADR-008); matching it whole also guards the file path.
+RECORDING_SID = re.compile(r"RE([0-9a-f]{32})")
 
 
 @asynccontextmanager
@@ -282,3 +287,79 @@ async def list_calls(request: Request, pool: Pool) -> dict[str, Any]:
         "next_page_uri": page_uri(page + 1) if len(rows) > size else None,
         "previous_page_uri": page_uri(page - 1) if page > 0 else None,
     }
+
+
+def recording_path(call: db.Call) -> Path | None:
+    """Listed only once the call has ended, so nobody downloads a half-written file."""
+    path = config.RECORDINGS_DIR / f"{call.sid}.wav"
+    return path if call.status in ENDED and path.exists() else None
+
+
+def recording_json(request: Request, call: db.Call, path: Path) -> dict[str, Any]:
+    sid = f"RE{call.sid[2:]}"
+    uri = f"{API}/Accounts/{config.ACCOUNT_SID}/Recordings/{sid}"
+    seconds = (path.stat().st_size - HEADER_BYTES) / (2 * RATE)  # 16-bit mono
+    return {
+        "sid": sid,
+        "account_sid": config.ACCOUNT_SID,
+        "api_version": "2010-04-01",
+        "call_sid": call.sid,
+        "conference_sid": None,
+        "date_created": rfc2822(call.start_time),
+        "date_updated": rfc2822(call.end_time or call.date_updated),
+        "start_time": rfc2822(call.start_time),
+        "duration": str(round(seconds)),
+        "price": None,
+        "price_unit": "USD",
+        "status": "completed",
+        "channels": 1,
+        "source": "OutboundAPI",
+        "error_code": None,
+        "uri": f"{uri}.json",
+        "encryption_details": None,
+        "subresource_uris": {},
+        "media_url": f"{str(request.base_url).rstrip('/')}{uri}",
+    }
+
+
+async def find_recording(pool: AsyncConnectionPool, recording_sid: str) -> tuple[db.Call, Path]:
+    if m := RECORDING_SID.fullmatch(recording_sid):
+        call = await db.get_call(pool, f"CA{m[1]}")
+        if call and (path := recording_path(call)):
+            return call, path
+    raise HTTPException(404)
+
+
+@app.get(f"{ACCOUNT}/Calls/{{call_sid}}/Recordings.json", dependencies=[Auth])
+async def list_call_recordings(call_sid: str, request: Request, pool: Pool) -> dict[str, Any]:
+    call = await db.get_call(pool, call_sid)
+    if call is None:
+        raise HTTPException(404)
+    path = recording_path(call)
+    recordings = [recording_json(request, call, path)] if path else []
+    uri = f"{request.url.path}?PageSize=50&Page=0"  # one recording per call: always one page
+    return {
+        "recordings": recordings,
+        "page": 0,
+        "page_size": 50,
+        "start": 0,
+        "end": max(len(recordings) - 1, 0),
+        "uri": uri,
+        "first_page_uri": uri,
+        "next_page_uri": None,
+        "previous_page_uri": None,
+    }
+
+
+@app.get(f"{ACCOUNT}/Recordings/{{recording_sid}}.json", dependencies=[Auth])
+async def fetch_recording(recording_sid: str, request: Request, pool: Pool) -> dict[str, Any]:
+    return recording_json(request, *await find_recording(pool, recording_sid))
+
+
+# No extension also serves the WAV, as on Twilio. Routes match in registration order and
+# stacked decorators register bottom-up, so .wav (and .json above) win over the bare path.
+@app.get(f"{ACCOUNT}/Recordings/{{recording_sid}}", dependencies=[Auth])
+@app.get(f"{ACCOUNT}/Recordings/{{recording_sid}}.wav", dependencies=[Auth])
+async def download_recording(recording_sid: str, pool: Pool) -> FileResponse:
+    _, path = await find_recording(pool, recording_sid)
+    return FileResponse(path, media_type="audio/x-wav")

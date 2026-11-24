@@ -1,6 +1,7 @@
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -116,8 +117,6 @@ def test_create_validation(
 
 def test_create_stores_callback_settings(client: TestClient) -> None:
     # Not in the Call JSON, so read the row the runner will use.
-    import psycopg
-
     sid = client.post(
         f"{BASE}/Calls.json",
         data={

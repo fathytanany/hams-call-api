@@ -3,6 +3,7 @@
 import audioop
 import struct
 import wave
+from collections import deque
 from pathlib import Path
 from typing import Self
 
@@ -10,6 +11,7 @@ RATE = 8000
 FRAME_BYTES = RATE * 20 // 1000  # 160 samples, one mu-law byte each
 ULAW_SILENCE = b"\xff"
 HEADER_BYTES = 44
+PLAYOUT_MAX_BYTES = 60 * RATE  # 60s of app audio (ASSUMPTIONS 18)
 
 
 class MediaFormatError(ValueError):
@@ -98,3 +100,56 @@ class RecordingWriter:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+class Playout:
+    """App audio and marks in arrival order, played out one frame per tick (ADR-008).
+
+    A mark comes back on the tick that plays the last audio queued before it, so marks
+    report playback rather than arrival.
+    """
+
+    def __init__(self) -> None:
+        self._items: deque[bytes | str] = deque()  # audio chunks and mark names
+        self._bytes = 0
+        self.dropped_bytes = 0
+
+    def add_audio(self, ulaw: bytes) -> None:
+        room = PLAYOUT_MAX_BYTES - self._bytes
+        if len(ulaw) > room:
+            self.dropped_bytes += len(ulaw) - room
+            ulaw = ulaw[:room]
+        if ulaw:
+            self._items.append(ulaw)
+            self._bytes += len(ulaw)
+
+    def add_mark(self, name: str) -> None:
+        self._items.append(name)
+
+    def clear(self) -> list[str]:
+        """Drops buffered audio; the pending marks are returned at once, as Twilio does."""
+        marks = [i for i in self._items if isinstance(i, str)]
+        self._items.clear()
+        self._bytes = 0
+        return marks
+
+    def play(self) -> tuple[bytes, list[str]]:
+        """The next 20 ms frame (silence-padded) and the marks it reached."""
+        frame = bytearray()
+        marks: list[str] = []
+        while self._items:
+            head = self._items[0]
+            if isinstance(head, str):
+                marks.append(head)
+                self._items.popleft()
+                continue
+            if len(frame) == FRAME_BYTES:
+                break
+            take = FRAME_BYTES - len(frame)
+            frame += head[:take]
+            if len(head) > take:
+                self._items[0] = head[take:]
+            else:
+                self._items.popleft()
+        self._bytes -= len(frame)
+        return bytes(frame).ljust(FRAME_BYTES, ULAW_SILENCE), marks

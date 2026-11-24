@@ -7,5 +7,6 @@ ACCOUNT_SID = os.environ.get("ACCOUNT_SID", "AC00000000000000000000000000000001"
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "dev-auth-token")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://callapi:callapi@localhost:5432/callapi")
 MEDIA_DIR = Path(os.environ.get("MEDIA_DIR", "media"))
+RECORDINGS_DIR = Path(os.environ.get("RECORDINGS_DIR", "recordings"))
 # Calls this server runs at once; extra calls wait in `queued`. 0 makes an API-only server.
 MAX_CALLS = int(os.environ.get("MAX_CALLS", "500"))

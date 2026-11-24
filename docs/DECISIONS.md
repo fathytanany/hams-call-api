@@ -99,7 +99,7 @@ Short ADRs, one per decision. Format: context → choice → why → rejected. W
 - **Choice:**
   - App audio goes into a playout buffer drained at real time, one 160-byte frame per tick.
   - Each tick writes the played frame, or silence if the buffer is empty, to `recordings/{CallSid}.wav`: 16-bit PCM, 8 kHz, mono.
-  - Marks fire when playout reaches them. `clear` empties the buffer and returns all pending marks.
+  - Marks fire when playout reaches them: on the tick that plays the last audio queued before the mark, so timing is accurate to one 20 ms frame. A mark sent with nothing buffered returns on the next tick. `clear` empties the buffer and returns all pending marks at once.
   - Files live on a volume shared by all servers.
   - Exposed through Twilio's Recording endpoints. The `RE` sid is derived from the call's hex, so there is no extra table.
 - **Why:**

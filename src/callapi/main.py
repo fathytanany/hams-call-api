@@ -35,8 +35,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # A random suffix: a restarted container keeps its hostname and pid but must not
         # inherit the dead instance's calls.
         server_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+        config.RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
         supervisor = Supervisor(
-            pool, server_id=server_id, max_calls=config.MAX_CALLS, media_dir=config.MEDIA_DIR
+            pool,
+            server_id=server_id,
+            max_calls=config.MAX_CALLS,
+            media_dir=config.MEDIA_DIR,
+            recordings_dir=config.RECORDINGS_DIR,
         )
         app.state.pool, app.state.supervisor = pool, supervisor
         task = asyncio.create_task(supervisor.run())

@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,6 +60,11 @@ class FakeApp:
 
     url: str
     received: list[tuple[float, dict[str, Any]]] = field(default_factory=list)
+    # Set by a test to answer messages, e.g. echo audio or send marks.
+    on_message: Callable[[ServerConnection, dict[str, Any]], Awaitable[None]] | None = None
+
+    def first(self, event: str) -> tuple[float, dict[str, Any]]:
+        return next((t, m) for t, m in self.received if m["event"] == event)
 
     def events(self) -> list[str]:
         return [m["event"] for _, m in self.received]
@@ -70,8 +75,11 @@ async def fake_app() -> AsyncIterator[FakeApp]:
     app = FakeApp("")
 
     async def handler(ws: ServerConnection) -> None:
-        async for msg in ws:
-            app.received.append((time.monotonic(), json.loads(msg)))
+        async for raw in ws:
+            msg = json.loads(raw)
+            app.received.append((time.monotonic(), msg))
+            if app.on_message:
+                await app.on_message(ws, msg)
 
     async with serve(handler, "127.0.0.1", 0) as server:
         port = next(iter(server.sockets)).getsockname()[1]

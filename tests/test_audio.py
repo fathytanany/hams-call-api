@@ -9,8 +9,10 @@ import pytest
 
 from callapi.audio import (
     FRAME_BYTES,
+    PLAYOUT_MAX_BYTES,
     MediaFormatError,
     MediaReader,
+    Playout,
     RecordingWriter,
     patch_wav_header,
 )
@@ -153,3 +155,61 @@ def test_patch_leaves_complete_recording_unchanged(tmp_path: Path) -> None:
     before = path.read_bytes()
     patch_wav_header(path)
     assert path.read_bytes() == before
+
+
+def drain(p: Playout, ticks: int) -> list[tuple[bytes, list[str]]]:
+    return [p.play() for _ in range(ticks)]
+
+
+def test_playout_cuts_arbitrary_chunks_into_contiguous_frames() -> None:
+    p = Playout()
+    audio = bytes(range(256)) * 2  # 512 bytes in odd-sized chunks
+    for i in range(0, len(audio), 37):
+        p.add_audio(audio[i : i + 37])
+    frames = [f for f, _ in drain(p, 4)]
+    assert all(len(f) == FRAME_BYTES for f in frames)
+    assert b"".join(frames) == audio.ljust(4 * FRAME_BYTES, b"\xff")
+
+
+def test_empty_playout_is_silence() -> None:
+    assert Playout().play() == (b"\xff" * FRAME_BYTES, [])
+
+
+def test_mark_with_nothing_buffered_returns_on_the_next_tick() -> None:
+    p = Playout()
+    p.add_mark("now")
+    assert p.play() == (b"\xff" * FRAME_BYTES, ["now"])
+
+
+def test_mark_returns_when_the_audio_before_it_plays() -> None:
+    p = Playout()
+    p.add_audio(b"\x01" * 8000)  # 1s
+    p.add_mark("after-1s")
+    p.add_audio(b"\x02" * 320)
+    results = drain(p, 52)
+    marked = [i for i, (_, marks) in enumerate(results) if marks]
+    # Tick 49 plays the last 20 ms of the first second; audio after the mark keeps flowing.
+    assert marked == [49]
+    assert results[49][1] == ["after-1s"]
+    assert results[50][0] == b"\x02" * FRAME_BYTES
+
+
+def test_clear_drops_audio_and_returns_pending_marks_in_order() -> None:
+    p = Playout()
+    p.add_audio(b"\x01" * 1600)
+    p.add_mark("a")
+    p.add_audio(b"\x01" * 1600)
+    p.add_mark("b")
+    p.play()
+    assert p.clear() == ["a", "b"]
+    assert p.play() == (b"\xff" * FRAME_BYTES, [])
+
+
+def test_playout_caps_buffered_audio() -> None:
+    p = Playout()
+    p.add_audio(b"\x01" * (PLAYOUT_MAX_BYTES - 100))
+    p.add_audio(b"\x02" * 300)
+    assert p.dropped_bytes == 200
+    p.add_mark("still-queued")  # marks are never dropped
+    frames = drain(p, PLAYOUT_MAX_BYTES // FRAME_BYTES)
+    assert frames[-1][1] == ["still-queued"]

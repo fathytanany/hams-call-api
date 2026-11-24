@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -15,16 +15,18 @@ from typing import Any
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from callapi import config, db
-from callapi.audio import MediaReader
+from callapi.audio import MediaReader, Playout, RecordingWriter
 
 log = logging.getLogger(__name__)
 
 FRAME_SECONDS = 0.02
 POLL_SECONDS = 1.0  # claim interval when nobody pokes us (ADR-003)
 CONNECT_TIMEOUT = 10  # ASSUMPTIONS 12
+
+Send = Callable[..., Awaitable[None]]
 
 
 async def paced(frames: Iterator[bytes]) -> AsyncIterator[bytes]:
@@ -43,8 +45,36 @@ async def paced(frames: Iterator[bytes]) -> AsyncIterator[bytes]:
         await asyncio.sleep(delay)
 
 
-async def stream(ws: ClientConnection, call: db.Call, media: MediaReader) -> None:
-    """Media Streams messages, TWILIO_CONTRACT §5."""
+async def receive(
+    ws: ClientConnection, stream_sid: str, playout: Playout, send: Send, sid: str
+) -> None:
+    """App -> service messages: media and marks queue for playout, clear empties it."""
+    with suppress(ConnectionClosed):  # the pacer's next send sees the close and ends the call
+        async for raw in ws:
+            try:
+                msg = json.loads(raw)
+                if msg.get("streamSid") != stream_sid:
+                    raise ValueError(f"streamSid {msg.get('streamSid')!r}")
+                match msg["event"]:
+                    case "media":
+                        playout.add_audio(base64.b64decode(msg["media"]["payload"], validate=True))
+                    case "mark":
+                        playout.add_mark(str(msg["mark"]["name"]))
+                    case "clear":
+                        for name in playout.clear():
+                            await send("mark", mark={"name": name})
+                    case event:
+                        raise ValueError(f"unknown event {event!r}")
+            except (ValueError, KeyError, TypeError, AttributeError) as e:
+                # A bad message is ignored; the call goes on (ASSUMPTIONS 17).
+                log.warning("call %s: ignored app message: %r", sid, e)
+
+
+async def stream(
+    ws: ClientConnection, call: db.Call, media: MediaReader, recording: RecordingWriter
+) -> None:
+    """Media Streams messages, TWILIO_CONTRACT §5. Each tick sends one frame of the file
+    and plays one frame of the app's audio into the recording."""
     stream_sid = f"MZ{uuid.uuid4().hex}"
     seq = itertools.count(1)
 
@@ -64,27 +94,44 @@ async def stream(ws: ClientConnection, call: db.Call, media: MediaReader) -> Non
             "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1},
         },
     )
-    chunk = 0
-    async for frame in paced(iter(media.read_frame, None)):
-        chunk += 1
-        media_body = {
-            "track": "inbound",
-            "chunk": str(chunk),
-            "timestamp": str((chunk - 1) * 20),
-            "payload": base64.b64encode(frame).decode(),
-        }
-        await send("media", media=media_body)
-    await send("stop", stop={"accountSid": config.ACCOUNT_SID, "callSid": call.sid})
+    playout = Playout()
+    receiver = asyncio.create_task(receive(ws, stream_sid, playout, send, call.sid))
+    try:
+        chunk = 0
+        async for frame in paced(iter(media.read_frame, None)):
+            chunk += 1
+            media_body = {
+                "track": "inbound",
+                "chunk": str(chunk),
+                "timestamp": str((chunk - 1) * 20),
+                "payload": base64.b64encode(frame).decode(),
+            }
+            await send("media", media=media_body)
+            played, marks = playout.play()
+            recording.write(played)
+            for name in marks:
+                await send("mark", mark={"name": name})
+        await send("stop", stop={"accountSid": config.ACCOUNT_SID, "callSid": call.sid})
+    finally:
+        receiver.cancel()
+        if playout.dropped_bytes:
+            log.warning(
+                "call %s: dropped %d bytes over the playout cap", call.sid, playout.dropped_bytes
+            )
 
 
-async def run_call(pool: AsyncConnectionPool, call: db.Call, owner: str, media_dir: Path) -> None:
+async def run_call(
+    pool: AsyncConnectionPool, call: db.Call, owner: str, media_dir: Path, recordings_dir: Path
+) -> None:
     with MediaReader(media_dir / f"{call.to_number}.wav") as media:
         answered = await db.answer_call(pool, call.sid, owner)
         if answered is None:
             return  # another server reaped it while we were ringing
         try:
             async with connect(call.stream_url, open_timeout=CONNECT_TIMEOUT) as ws:
-                await stream(ws, call, media)
+                # Opened at `start`, so the recording lines up with the stream's timestamps.
+                with RecordingWriter(recordings_dir / f"{call.sid}.wav") as recording:
+                    await stream(ws, call, media, recording)
         except (OSError, TimeoutError, WebSocketException) as e:
             # The callee already answered, so a broken stream still ends `completed` (ADR-010).
             log.warning("call %s: stream to %s ended early: %r", call.sid, call.stream_url, e)
@@ -95,14 +142,19 @@ class Supervisor:
     """Claims queued calls up to max_calls and runs one task per call."""
 
     def __init__(
-        self, pool: AsyncConnectionPool, *, server_id: str, max_calls: int, media_dir: Path
+        self,
+        pool: AsyncConnectionPool,
+        *,
+        server_id: str,
+        max_calls: int,
+        media_dir: Path,
+        recordings_dir: Path,
     ) -> None:
-        self.pool, self.server_id, self.max_calls, self.media_dir = (
-            pool,
-            server_id,
-            max_calls,
-            media_dir,
-        )
+        self.pool = pool
+        self.server_id = server_id
+        self.max_calls = max_calls
+        self.media_dir = media_dir
+        self.recordings_dir = recordings_dir
         self.calls: set[asyncio.Task[None]] = set()
         self._poke = asyncio.Event()
 
@@ -127,7 +179,10 @@ class Supervisor:
                     claimed = []
                 for call in claimed:
                     task = asyncio.create_task(
-                        run_call(self.pool, call, self.server_id, self.media_dir), name=call.sid
+                        run_call(
+                            self.pool, call, self.server_id, self.media_dir, self.recordings_dir
+                        ),
+                        name=call.sid,
                     )
                     self.calls.add(task)
                     task.add_done_callback(self._done)
